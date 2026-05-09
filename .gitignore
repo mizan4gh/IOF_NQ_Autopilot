@@ -1,0 +1,11 @@
+# Sierra Chart data files (too large for GitHub)
+*.scid
+*.zip
+NQZ25-CME.*
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Claude session data
+.claude/
