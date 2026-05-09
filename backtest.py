@@ -620,24 +620,56 @@ class Imb:
     extreme:   float = 0.0
 
 def imbalance_state(bars: List[Bar], i: int) -> Imb:
+    """
+    Mirrors C++ ImbalanceState: score-based detection using delta streak,
+    aggression ratio, and consecutive price acceptance.  Needs score >= 2.
+    """
     imb = Imb()
     if i < 5:
         return imb
-    start = max(0, i - 7)
-    ask = sum(bars[j].ask_vol for j in range(start, i + 1))
-    bid = sum(bars[j].bid_vol for j in range(start, i + 1))
-    tot = ask + bid
-    if tot <= 0:
+
+    # 1. Delta streak: d[0] > d[1] > d[2] (accelerating) determines direction
+    d = [bars[i-k].ask_vol - bars[i-k].bid_vol for k in range(3) if i - k >= 0]
+    if len(d) < 3:
         return imb
-    pct = ask / tot
-    if pct >= 0.60:
-        imb.active = True; imb.direction = +1
-        imb.strength = int((pct - 0.50) * 20)
-        imb.extreme  = max(bars[j].high for j in range(start, i + 1))
-    elif pct <= 0.40:
-        imb.active = True; imb.direction = -1
-        imb.strength = int((0.50 - pct) * 20)
-        imb.extreme  = min(bars[j].low  for j in range(start, i + 1))
+    if d[0] > d[1] > d[2] and d[0] > 0:
+        imb.direction = +1
+    elif d[0] < d[1] < d[2] and d[0] < 0:
+        imb.direction = -1
+    else:
+        return imb
+
+    score = 1  # delta streak itself counts
+
+    # 2. Aggression ratio over 5 bars (mirrors C++ 62%/72% thresholds)
+    start5 = max(0, i - 4)
+    ask5 = sum(bars[j].ask_vol for j in range(start5, i + 1))
+    bid5 = sum(bars[j].bid_vol for j in range(start5, i + 1))
+    tot5 = ask5 + bid5
+    if tot5 > 0:
+        aggR = (ask5 / tot5) if imb.direction > 0 else (bid5 / tot5)
+        if aggR >= 0.55: score += 1
+        if aggR >= 0.65: score += 1
+
+    # 3. Consecutive price acceptance: close[k] > high[k-1] (bull) / < low[k-1] (bear)
+    accept = 0
+    for k in range(min(8, i)):
+        if imb.direction > 0 and bars[i-k].close > bars[i-k-1].high:
+            accept += 1
+        elif imb.direction < 0 and bars[i-k].close < bars[i-k-1].low:
+            accept += 1
+        else:
+            break
+    if accept >= 2: score += 1
+    if accept >= 4: score += 1
+
+    if score >= 2:
+        imb.active   = True
+        imb.strength = score
+        imb.extreme  = (max(bars[j].high for j in range(start5, i + 1)) if imb.direction > 0
+                        else min(bars[j].low for j in range(start5, i + 1)))
+    else:
+        imb.direction = 0
     return imb
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1064,12 +1096,16 @@ class Backtester:
             if same: return
 
         # ── Quality score ─────────────────────────────────────────────────────
-        # M1/M2/M3 use (finalScore*100)/15 formula — need score >= 6 to clear floor 40.
-        # Production composite includes ctrl + multiple delta/structure components.
-        # Approximate with ctrl_signed + delta count (range 0-10).
+        # M1/M2/M3: (finalScore*100)/15 — need score >= 6 to clear floor 40.
+        # M4/M5/M7: finalScore*10 — Python sc max=5, needs sc>=5.
+        # M6: use bk_vs (bkVerifyScore) directly — the mode-specific quality
+        #     measure. bk_vs*10 maps 5→50, 6→60; C++ scL/scS achieves this
+        #     via 12-component score which Python doesn't replicate.
         if sel <= 2:
             ctrl_signed = max(0, ctrl if sl else -ctrl)
             final_sc = (sc_l if sl else sc_s) + ctrl_signed
+        elif sel == 5:
+            final_sc = bk_vs  # M6: use breakout verification score
         else:
             final_sc = sc_l if sl else sc_s
         q = qual100(sel, final_sc, fade_edge, fade_active)
