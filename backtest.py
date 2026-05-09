@@ -70,7 +70,7 @@ SCID_DTYPE = np.dtype([
 # ─────────────────────────────────────────────────────────────────────────────
 #  CONSTANTS  (mirror C++ hardcodes in IOF_NQ_Autopilot.cpp)
 # ─────────────────────────────────────────────────────────────────────────────
-TARGET_VOL   = 3000          # contracts per bar
+TARGET_VOL   = 2500          # contracts per bar
 RTH_OPEN     = 935           # 09:35 ET
 FLATTEN_HHMM = 1555          # 15:55 ET  (inlined .cpp default)
 
@@ -86,7 +86,7 @@ C_STOP_FL    = 20.0;  C_STOP_CL = 40.0
 C_T1_FL      = 25.0;  C_T1_CL   = 50.0
 C_T2_FL      = 75.0;  C_T2_CL   = 125.0
 C_RM_FLOOR   = 0.60
-QUAL_FLOOR   = 40
+QUAL_FLOOR   = 50
 C_MIN_SC_M1  = 4
 C_MIN_SC_ALL = 3
 C_COOL_TRADE = 5
@@ -97,13 +97,13 @@ C_VWAP_MAT   = 40
 C_DELTA_MAT  = 25
 C_CONSOL_LB  = 25
 C_CONSOL_ATR = 1.5
-C_SWEEP_LB   = 10
-C_M5_COOL    = 15
-C_M5_MIN_SC  = 4
-C_MAX_LOSSES = 3
+C_SWEEP_LB   = 15
+C_M5_COOL    = 30
+C_M5_MIN_SC  = 5
+C_MAX_LOSSES = 2
 C_STRUCT_LB  = 25
 
-DAILY_LOSS   = 1000.0
+DAILY_LOSS   = 800.0
 DAILY_PROF   = 1000.0
 MAX_TRADES   = 6
 TICK         = 0.25
@@ -735,10 +735,11 @@ class Backtester:
         self.out: List[Trade] = []
 
         # Indicators (pre-computed)
-        self.atr_v:  List[float] = []
-        self.vwap_v: List[float] = []
+        self.atr_v:   List[float] = []
+        self.vwap_v:  List[float] = []
         self.vwap_sd: List[float] = []
-        self.cum_d:  List[float] = []
+        self.cum_d:   List[float] = []
+        self.avg_d:   List[float] = []  # EMA-64 of |bar_delta| — mirrors C++ SG_ADELT
 
         # Objects
         self.vp    = VP5Day()
@@ -783,15 +784,20 @@ class Backtester:
         atr_ind   = WilderATR(ATR_PER)
         vwap_ind  = SessionVWAP()
         cd        = 0.0
+        _ad_ema   = 0.0
+        _ad_alpha = 2.0 / 66.0   # EMA-64, mirrors C++ SG_ADELT update
         for bar in self.bars:
             a = atr_ind.update(bar.high, bar.low, bar.close)
             v, s = vwap_ind.update(bar)
             cd += bar.ask_vol - bar.bid_vol
+            bar_abs_d = abs(bar.ask_vol - bar.bid_vol)
+            _ad_ema = _ad_ema + _ad_alpha * (bar_abs_d - _ad_ema) if _ad_ema > 0 else float(bar_abs_d)
             self.vp.update(bar)
             self.atr_v.append(a)
             self.vwap_v.append(v)
             self.vwap_sd.append(s)
             self.cum_d.append(cd)
+            self.avg_d.append(max(1.0, _ad_ema))
 
         print("  Running strategy loop...")
         warmup = max(C_STRUCT_LB, ATR_PER + 5, 40)
@@ -910,15 +916,21 @@ class Backtester:
             sw_lo = min(self.bars[j].low  for j in range(i - C_SWEEP_LB, i))
             sw_hi = max(self.bars[j].high for j in range(i - C_SWEEP_LB, i))
             m4_min = C_MIN_SC_ALL if abs(div.strength) >= 2 else C_MIN_SC_ALL + 1
-            if bar.low < sw_lo - TICK and bar.close > sw_lo and bull and sc_l >= m4_min and ctrl >= 0:
+            # [EdgeDiscovery] gate: price must be ≥0.35 ATR from VWAP
+            m4_vwap_edge = (vwap <= 0) or (abs(bar.close - vwap) >= atr * 0.35)
+            if m4_vwap_edge and bar.low < sw_lo - TICK and bar.close > sw_lo and bull and sc_l >= m4_min and ctrl >= 0:
                 m4l = True
-            if bar.high > sw_hi + TICK and bar.close < sw_hi and bear and sc_s >= m4_min and ctrl <= 0:
+            if m4_vwap_edge and bar.high > sw_hi + TICK and bar.close < sw_hi and bear and sc_s >= m4_min and ctrl <= 0:
                 m4s = True
 
         # M5 — Trap reversal
+        lb_delta = self.cum_d[i] - self.cum_d[max(0, i - 15)]
+        avg_d    = self.avg_d[i]   # EMA-64 of |bar_delta|, mirrors C++ SG_ADELT
         if self.trap.valid and self.trap.phase == 3:
             cool = self.last_m5_bar < 0 or i > self.last_m5_bar + C_M5_COOL
-            if cool:
+            # [EdgeDiscovery] gate: lookback cumulative delta ≥3× avg bar delta
+            m5_delta_edge = abs(lb_delta) >= avg_d * 3.0
+            if cool and m5_delta_edge:
                 if self.trap.direction == +1 and sc_s >= C_M5_MIN_SC and ctrl <= 2:
                     m5s = True
                 if self.trap.direction == -1 and sc_l >= C_M5_MIN_SC and ctrl >= -2:
@@ -953,7 +965,7 @@ class Backtester:
                 if wick < atr * 0.3: bk_verify += 1
                 bk_vs = bk_verify
 
-                if bk_verify >= 5:   # simplified (production = 7)
+                if bk_verify >= 5:   # simplified (production = 6)
                     rw = bal.hi - bal.lo
                     if break_dir > 0:
                         m6l = True
@@ -1022,22 +1034,14 @@ class Backtester:
                     fd_sp = bar.low - atr * 0.3
                     fd_t1 = bal.poc; fd_t2 = bal.hi
 
-        # ── Priority selection ────────────────────────────────────────────────
+        # ── Priority selection (M4, M5, M6 only) ─────────────────────────────
         sel = -1; sl = False
         if   m6l: sel = 5; sl = True
         elif m6s: sel = 5
-        elif m7l: sel = 6; sl = True
-        elif m7s: sel = 6
-        elif m8l: sel = 7; sl = True
-        elif m8s: sel = 7
         elif m5l: sel = 4; sl = True
         elif m5s: sel = 4
         elif m4l: sel = 3; sl = True
         elif m4s: sel = 3
-        elif m3l: sel = 2; sl = True
-        elif m3s: sel = 2
-        elif m2l: sel = 1; sl = True
-        elif m2s: sel = 1
         if sel < 0: return
 
         # ── Regime filter ────────────────────────────────────────────────────

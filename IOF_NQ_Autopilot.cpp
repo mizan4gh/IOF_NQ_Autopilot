@@ -549,14 +549,14 @@ static const int   C_OPEN_COOL      = 36;
 static const int   C_VWAP_MATURE    = 40;
 static const int   C_STRUCT_LB      = 25;
 static const float C_STRUCT_MAX     = 1.5f;
-static const int   C_MAX_LOSSES     = 3;
+static const int   C_MAX_LOSSES     = 2;
 static const int   C_VWAP_SLP_LB    = 20;
 static const int   C_CONSOL_LB      = 25;
 static const float C_CONSOL_ATR     = 1.5f;
-static const int   C_SWEEP_LB       = 10;
+static const int   C_SWEEP_LB       = 15;
 static const int   C_SPIKE_COOL     = 20;
-static const int   C_M5_MIN_SC      = 4;
-static const int   C_M5_COOLDOWN    = 15;
+static const int   C_M5_MIN_SC      = 5;
+static const int   C_M5_COOLDOWN    = 30;
 static const float C_SPIKE_ATR_M    = 3.0f;
 static const int   C_DELTA_MATURE   = 25;
 static const float C_VCOOL_THRESH   = 7.0f;
@@ -2866,17 +2866,20 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
         bool m4CtrlL=(controlScore>=0), m4CtrlS=(controlScore<=0);
         int divStr=pDiv?(pDiv->strength<0?-pDiv->strength:pDiv->strength):0;
         int M4_MIN_SCORE=(divStr>=2)?C_MIN_SCORE_ALL:(C_MIN_SCORE_ALL+1);
+        // [EdgeDiscovery] Require price to be at least 0.35 ATR from VWAP — avoids
+        // taking sweep-reclaims when price is grinding through the VWAP mid-zone.
+        bool m4VwapEdge=(VWAP<=0.f||FAbs(Close0-VWAP)>=ATR*0.35f);
         float swLo=sc.Low[Idx-1], swHi=sc.High[Idx-1];
         for(int k=2;k<=C_SWEEP_LB&&Idx>=k;k++){
             if(sc.Low[Idx-k]<swLo) swLo=sc.Low[Idx-k];
             if(sc.High[Idx-k]>swHi) swHi=sc.High[Idx-k];
         }
-        if(Low0<swLo-TICK&&Close0>swLo&&barBullish&&(DL||LBL)&&m4CtrlL){
+        if(m4VwapEdge&&Low0<swLo-TICK&&Close0>swLo&&barBullish&&(DL||LBL)&&m4CtrlL){
             int es=DL?scL:lbScL;
             bool iceBlock=(pIce&&pIce->askIceberg&&FAbs(pIce->askIcebergPx-swLo)<=ATR*0.5f);
             if(es>=M4_MIN_SCORE&&!iceBlock) m4L=true;
         }
-        if(High0>swHi+TICK&&Close0<swHi&&barBearish&&(DS||LBS)&&m4CtrlS){
+        if(m4VwapEdge&&High0>swHi+TICK&&Close0<swHi&&barBearish&&(DS||LBS)&&m4CtrlS){
             int es=DS?scS:lbScS;
             bool iceBlock=(pIce&&pIce->bidIceberg&&FAbs(pIce->bidIcebergPx-swHi)<=ATR*0.5f);
             if(es>=M4_MIN_SCORE&&!iceBlock) m4S=true;
@@ -2889,7 +2892,10 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
     bool m5L=false, m5S=false;
     if(pTrap&&pTrap->valid&&pTrap->phase==3){
         bool m5CoolOK=(C_M5_COOLDOWN<=0)||(LastM5Bar<0)||(Idx>LastM5Bar+C_M5_COOLDOWN);
-        if(m5CoolOK){
+        // [EdgeDiscovery] Require lookback cumulative delta to be at least 3× the
+        // average single-bar delta — confirms sustained directional flow built the trap.
+        bool m5DeltaEdge=(FAbs(lbDelta)>=avgD*3.0f);
+        if(m5CoolOK&&m5DeltaEdge){
             int m5ScL=DL?scL:(LBL?lbScL:0);
             int m5ScS=DS?scS:(LBS?lbScS:0);
             if(pTrap->direction==+1){if(m5ScS>=C_M5_MIN_SC&&controlScore<=2) m5S=true;}
@@ -2969,7 +2975,7 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
             if(noDivConf) bkVerifyScore++;
             float swRet=(breakDir>0)?(High0-Close0):(Close0-Low0);
             if(swRet<ATR*0.3f) bkVerifyScore++;
-            if(bkVerifyScore>=7){
+            if(bkVerifyScore>=6){
                 float rangeW=pBal->rangeHigh-pBal->rangeLow;
                 if(breakDir>0){m6L=true; m6Stop=pBal->rangeHigh-ATR*0.25f; m6T1=pBal->rangeHigh+rangeW*0.5f; m6T2=pBal->rangeHigh+rangeW;}
                 else{m6S=true; m6Stop=pBal->rangeLow+ATR*0.25f; m6T1=pBal->rangeLow-rangeW*0.5f; m6T2=pBal->rangeLow-rangeW;}
