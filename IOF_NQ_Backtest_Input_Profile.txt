@@ -1,0 +1,44 @@
+IOF NQ Autopilot - Backtest Input Profile (6-month / 3k vol / $1k caps)
+----------------------------------------------------------------------
+Instrument: NQ (continuous contract or front-month per your data vendor)
+Bar type: 3000 contract volume per bar (matches kTargetVolumeBars)
+Session template: RTH 09:35-15:55 ET (flatten input default 1555)
+
+Sierra Chart — six months of history
+- Chart >> Chart Settings: Bar Period Type = Volume; Bar Period Value = 3000
+- Use Bid Volume with Use Bid and Ask Volume enabled (orderflow study requirement)
+- Chart >> Chart Settings >> Days to Load: set high enough to cover ~6 calendar months
+  of sessions on volume bars (e.g. 180-220+ days), or set an explicit Start Date ~6 months
+  back and Download Historical Data for the symbol until the chart is full
+- Time Zone: align to exchange / US Eastern for RTH session filters
+- For walk-forward style testing: Replay the same window with Trade Simulation enabled,
+  or rely on full recalculation + Trade Sim on historical bars per Sierra’s workflow
+
+Risk:
+- Daily Loss $: 1000 (drives risk budget; $1k daily loss cap)
+- Daily Profit Target $: 1000 (set to 0 in study inputs if you want loss-only cap)
+- Max Position Size: 1
+- Max Trades/Day: 6
+- Flatten HHMM: 1555
+
+Execution:
+- Entry order mode: Market (headless baseline)
+- Attached exits: stop/target managed by strategy
+- CSV journal: enabled
+
+Controls:
+- Enable Auto Trading (1=live orders): 1 for Trade Simulation / replay fills (0 = no orders submitted)
+- Regime filter: enabled
+- Fade engine: enabled
+- News filter: enabled (calendar integration placeholder in Python harness)
+- Auto-disable bad modes: enabled
+- M1 VWAP reclaim: off (manual default)
+
+V1 hooks:
+- V1 hooks mode: 0 (off by default in production)
+- Min confirmations: 3
+- Delta threshold: 12
+- Imbalance threshold: 0.58
+- Volume confirm multiplier: 1.1
+- Volume lookback: 20
+- Pace lookback: 3

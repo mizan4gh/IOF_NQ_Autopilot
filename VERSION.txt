@@ -1,0 +1,6 @@
+IOF_NQ_Production_Final bundle
+Study: IOF NQ NQ Autopilot (see header in IOF_NQ_Autopilot.cpp)
+Last sync from IOFv02: 2026-04-19 20:15:43
+Source tree: C:\Users\17034\OneDrive\Desktop\MyBabyBot\IOFv02
+Sync flags: CppOnly=False CopySierraDocs=False
+Purpose: Sierra Chart ACSIL - refresh before remote/local DLL build.
