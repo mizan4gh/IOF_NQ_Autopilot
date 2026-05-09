@@ -596,13 +596,17 @@ def balance_state(bars: List[Bar], i: int, atr: float) -> Balance:
         return b
     lb    = 15
     start = max(0, i - lb)
-    hi = max(bars[j].high for j in range(start, i + 1))
-    lo = min(bars[j].low  for j in range(start, i + 1))
+    n     = i - start  # number of prior bars (excludes current)
+    if n < 2:
+        return b
+    # Exclude current bar: balance range is from prior bars so breakout on bar i can exceed it
+    hi = max(bars[j].high for j in range(start, i))
+    lo = min(bars[j].low  for j in range(start, i))
     if atr * 0.3 < (hi - lo) <= atr * 2.5:
         b.mature  = True
         b.hi      = hi; b.lo = lo
         b.poc     = (hi + lo) / 2.0
-        b.avg_vol = sum(bars[j].volume for j in range(start, i + 1)) / (lb + 1)
+        b.avg_vol = sum(bars[j].volume for j in range(start, i)) / n
     return b
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -939,6 +943,7 @@ class Backtester:
                     self.last_m5_bar = i
 
         # M6 — Balance breakout
+        bk_vs = 10  # mirrors C++ bkVerifyScore=10; stays 10 if no breakout so M8 gate (<=4) stays closed
         if bal.mature and atr > 0:
             bk_t = atr * 0.30
             bk_verify = 0; break_dir = 0
