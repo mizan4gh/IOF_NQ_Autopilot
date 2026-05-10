@@ -98,8 +98,9 @@ C_DELTA_MAT  = 25
 C_CONSOL_LB  = 25
 C_CONSOL_ATR = 1.5
 C_SWEEP_LB   = 15
-C_M5_COOL    = 30
-C_M5_MIN_SC  = 5
+C_M5_COOL       = 30
+C_M5_MIN_SC     = 5
+C_M5_PHASE3_MAX = 20
 C_MAX_LOSSES = 2
 C_STRUCT_LB  = 25
 
@@ -489,13 +490,14 @@ class Trap:
     absorb_px:        float = 0.0
     stop_target:      float = 0.0
     entry_px:         float = 0.0
+    phase3_bar:       int   = -1
 
     def reset(self):
         self.phase = 0; self.direction = 0; self.valid = False
         self.commit_start_bar = -1; self.commit_bars = 0; self.commit_delta = 0.0
         self.commit_high = 0.0; self.commit_low = 0.0
         self.absorb_bar = -1; self.absorb_px = 0.0
-        self.stop_target = 0.0; self.entry_px = 0.0
+        self.stop_target = 0.0; self.entry_px = 0.0; self.phase3_bar = -1
 
 def update_trap(trap: Trap, bars: List[Bar], i: int, atr: float) -> Trap:
     if i < 2 or atr <= 0:
@@ -578,15 +580,16 @@ def update_trap(trap: Trap, bars: List[Bar], i: int, atr: float) -> Trap:
             trap.reset()
         elif trap.direction == +1:
             if b.close < trap.absorb_px - atr * 0.15 and bar_d < 0 and bar_bear:
-                trap.phase = 3; trap.valid = True; trap.entry_px = b.close
+                trap.phase = 3; trap.valid = True; trap.entry_px = b.close; trap.phase3_bar = i
         elif trap.direction == -1:
             if b.close > trap.absorb_px + atr * 0.15 and bar_d > 0 and bar_bull:
-                trap.phase = 3; trap.valid = True; trap.entry_px = b.close
+                trap.phase = 3; trap.valid = True; trap.entry_px = b.close; trap.phase3_bar = i
 
-    # ── Phase 3: armed — reset if price reclaims absorption level ────────────
+    # ── Phase 3: armed — reset if stale or price reclaims absorption level ───
     if trap.phase == 3:
         if trap.direction == +1 and b.close > trap.absorb_px: trap.reset()
         elif trap.direction == -1 and b.close < trap.absorb_px: trap.reset()
+        elif trap.phase3_bar >= 0 and i > trap.phase3_bar + C_M5_PHASE3_MAX: trap.reset()
 
     return trap
 
@@ -980,9 +983,9 @@ class Backtester:
             # [EdgeDiscovery] gate: lookback cumulative delta ≥3× avg bar delta
             m5_delta_edge = abs(lb_delta) >= avg_d * 3.0
             if cool and m5_delta_edge:
-                if self.trap.direction == +1 and sc_s >= C_M5_MIN_SC and ctrl <= 2:
+                if self.trap.direction == +1 and sc_s >= C_M5_MIN_SC and ctrl <= 0:
                     m5s = True
-                if self.trap.direction == -1 and sc_l >= C_M5_MIN_SC and ctrl >= -2:
+                if self.trap.direction == -1 and sc_l >= C_M5_MIN_SC and ctrl >= 0:
                     m5l = True
                 if m5l or m5s:
                     self.last_m5_bar = i

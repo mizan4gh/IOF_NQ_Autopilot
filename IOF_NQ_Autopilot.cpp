@@ -86,6 +86,16 @@
 //             Fix: set LastM5Bar = Idx whenever M5 arms (independent of
 //             entry outcome), enforcing the intended C_M5_COOLDOWN=15.
 //
+//    [v12.20] M5 quality tightening (derived from backtest analysis):
+//             (a) Phase-3 reclaim reset: if price closes back through absorbPx the
+//                 trap is invalidated (was missing in C++; Python already had it).
+//             (b) Phase-3 timeout: trap auto-resets after C_M5_PHASE3_MAX=20 bars in
+//                 phase 3, preventing stale traps from generating signals.
+//             (c) Lookback fallback removed: m5ScL/m5ScS now require current-bar delta
+//                 (DL/DS). LBL/LBS fallback made entry bar ambiguous.
+//             (d) controlScore gate narrowed: ±2 → 0. Requires neutral/correct-side
+//                 control at entry bar, not just "not strongly opposing".
+//
 //    [v12.19] Default daily caps: $1000 loss / $1000 profit (iof_unified defaults).
 //             ATR: clarified volume-bar semantics; floor when SG_ATR<=0 (warmup/edge).
 //
@@ -557,6 +567,7 @@ static const int   C_SWEEP_LB       = 15;
 static const int   C_SPIKE_COOL     = 20;
 static const int   C_M5_MIN_SC      = 5;
 static const int   C_M5_COOLDOWN    = 30;
+static const int   C_M5_PHASE3_MAX  = 20;
 static const float C_SPIKE_ATR_M    = 3.0f;
 static const int   C_DELTA_MATURE   = 25;
 static const float C_VCOOL_THRESH   = 7.0f;
@@ -755,7 +766,7 @@ static void WriteCSV(SCStudyInterfaceRef& sc, const char* Evt, const char* Side,
               "%d,%d,%.0f,%.2f,"
               "%.2f,%s,%d,%.2f,%.2f,"
               "%.2f,%.2f,%d,%d,"
-              "%.2f,%d,%d,%d,v12.19,%llu\n",
+              "%.2f,%d,%d,%d,v12.20,%llu\n",
         Y,Mo,D,Hr,Mi,Se,Evt,Side,Mode,Entry,SL,TP1,TP2,Qty,Score,
         CtrlSc,DivStr,Delta,BarSpd,
         ExitPx,ExitR,Hold,MAE,MFE,
@@ -951,8 +962,8 @@ struct VPState {
 struct IcebergState{bool bidIceberg,askIceberg;float bidIcebergPx,askIcebergPx,bidIcebergVol,askIcebergVol;int bidIcebergBars,askIcebergBars;
     void reset(){bidIceberg=askIceberg=false;bidIcebergPx=askIcebergPx=0.f;bidIcebergVol=askIcebergVol=0.f;bidIcebergBars=askIcebergBars=0;}};
 
-struct TrapState{int phase,direction,commitStartBar,commitBars;float commitDelta,commitHigh,commitLow,absorbPx;int absorbBar;float stopTarget,entryPx;bool valid;
-    void reset(){phase=0;direction=0;commitStartBar=-1;commitBars=0;commitDelta=0.f;commitHigh=0.f;commitLow=0.f;absorbPx=0.f;absorbBar=-1;stopTarget=0.f;entryPx=0.f;valid=false;}};
+struct TrapState{int phase,direction,commitStartBar,commitBars;float commitDelta,commitHigh,commitLow,absorbPx;int absorbBar,phase3Bar;float stopTarget,entryPx;bool valid;
+    void reset(){phase=0;direction=0;commitStartBar=-1;commitBars=0;commitDelta=0.f;commitHigh=0.f;commitLow=0.f;absorbPx=0.f;absorbBar=-1;phase3Bar=-1;stopTarget=0.f;entryPx=0.f;valid=false;}};
 
 struct BalanceState{bool active,mature;float rangeHigh,rangeLow,rangePOC,volumeTotal,vpConcentration,cumDelta;int barCount,deltaFlips;
     void reset(){active=false;mature=false;rangeHigh=rangeLow=rangePOC=0.f;volumeTotal=0.f;barCount=0;deltaFlips=0;cumDelta=0.f;vpConcentration=0.f;}};
@@ -2702,13 +2713,19 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
             if(Idx>pTrap->absorbBar+3){pTrap->reset();}
             else if(pTrap->direction==+1){
                 if(Close0<pTrap->absorbPx-ATR*0.15f&&barD<0.f&&barBearish){
-                    pTrap->phase=3; pTrap->valid=true; pTrap->entryPx=Close0;
+                    pTrap->phase=3; pTrap->valid=true; pTrap->entryPx=Close0; pTrap->phase3Bar=Idx;
                 }
             } else if(pTrap->direction==-1){
                 if(Close0>pTrap->absorbPx+ATR*0.15f&&barD>0.f&&barBullish){
-                    pTrap->phase=3; pTrap->valid=true; pTrap->entryPx=Close0;
+                    pTrap->phase=3; pTrap->valid=true; pTrap->entryPx=Close0; pTrap->phase3Bar=Idx;
                 }
             }
+        }
+        // [v12.20] Phase-3 reclaim reset + timeout
+        if(pTrap->phase==3){
+            if(pTrap->direction==+1&&Close0>pTrap->absorbPx) pTrap->reset();
+            else if(pTrap->direction==-1&&Close0<pTrap->absorbPx) pTrap->reset();
+            else if(pTrap->phase3Bar>=0&&Idx>pTrap->phase3Bar+C_M5_PHASE3_MAX) pTrap->reset();
         }
     }
 
@@ -2896,10 +2913,12 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
         // average single-bar delta — confirms sustained directional flow built the trap.
         bool m5DeltaEdge=(FAbs(lbDelta)>=avgD*3.0f);
         if(m5CoolOK&&m5DeltaEdge){
-            int m5ScL=DL?scL:(LBL?lbScL:0);
-            int m5ScS=DS?scS:(LBS?lbScS:0);
-            if(pTrap->direction==+1){if(m5ScS>=C_M5_MIN_SC&&controlScore<=2) m5S=true;}
-            if(pTrap->direction==-1){if(m5ScL>=C_M5_MIN_SC&&controlScore>=-2) m5L=true;}
+            // [v12.20] Require current-bar delta alignment; no lookback fallback
+            int m5ScL=DL?scL:0;
+            int m5ScS=DS?scS:0;
+            // [v12.20] controlScore narrowed ±2 → 0
+            if(pTrap->direction==+1){if(m5ScS>=C_M5_MIN_SC&&controlScore<=0) m5S=true;}
+            if(pTrap->direction==-1){if(m5ScL>=C_M5_MIN_SC&&controlScore>=0) m5L=true;}
             // [v12.14] Mark the bar M5 armed on, regardless of whether this signal
             //          ultimately becomes an entry. Without this, LastM5Bar stays at
             //          -1 forever and M5 re-arms every single bar that trap phase==3
