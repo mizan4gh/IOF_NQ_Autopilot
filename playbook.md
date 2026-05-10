@@ -99,10 +99,10 @@ Modes are evaluated every bar. At most one fires per bar. Priority: **M6 > M7 > 
 | M7 | 6 | Auction Reversal | Reversal | score x10 | R1-R8 auction failure signals |
 | M8 | 7 | Fade Engine | Counter-trend | edge x10 | Enabled by Fade Engine input |
 
-**Quality floor:** `V18A_QUALITY_FLOOR = 40` — `qScore100` must be >= 40 to submit any entry.
+**Quality floor:** `V18A_QUALITY_FLOOR = 50` — `qScore100` must be >= 50 to submit any entry.
 
-- M1/M2/M3 use `finalScore x 100 / 15` — needs score >= 6/15 to clear floor 40.
-- M4–M7 use `score x 10` — score >= 4 clears the floor (fixed v12.12; prior /15 scaling made score 4-6 = 26-40, unreachable).
+- M1/M2/M3 use `finalScore x 100 / 15` — needs score >= 8/15 to clear floor 50.
+- M4–M7 use `score x 10` — score >= 5 clears the floor (fixed v12.12; prior /15 scaling made score 4-6 = 26-40, unreachable).
 - M8 (fade): `edgeScore x 10` — only applies when `pFade->active`; otherwise falls through to `/15` scale.
 
 ### M5 Trap Phases
@@ -121,7 +121,7 @@ M5 fires only when `pTrap->phase == 3`:
 Stop = `rangeHigh - ATR×0.25` (long) or `rangeLow + ATR×0.25` (short)  
 T1 = balance edge + `rangeWidth × 0.5`  
 T2 = balance edge + `rangeWidth × 1.0`  
-Requires `bkVerifyScore >= 7` out of 10 possible points (V1–V10 checks).
+Requires `bkVerifyScore >= 6` out of 10 possible points (V1–V10 checks).
 
 ### M7 Entry Levels (auction-specific)
 
@@ -177,7 +177,7 @@ These are compiled in; not exposed as inputs. All ATR values are Wilder(14) on O
 | C_OPEN_COOL | 36 bars | Bars suppressed at RTH open before entries allowed |
 | C_VWAP_MATURE | 40 bars | Bars required before VWAP-dependent modes (M1, M2, M3) fire |
 | C_DELTA_MATURE | 25 bars | Bars required before cumulative delta is considered mature |
-| C_M5_COOLDOWN | 15 bars | M5 trap reversal cooldown between signals (v12.14 fix) |
+| C_M5_COOLDOWN | 30 bars | M5 trap reversal cooldown between signals (v12.14 fix) |
 | C_STRUCT_LB | 25 bars | Structure lookback for control score / swing detection |
 
 ### Volume Spike Cooldown
@@ -198,7 +198,7 @@ After an abnormally large bar (volume >= C_SPIKE_ATR_M × ATR-equivalent):
 |----------|-------|---------|
 | C_MIN_SCORE_M1 | 4 | Minimum raw score for M1 to arm |
 | C_MIN_SCORE_ALL | 3 | Minimum raw score for M2–M7 to arm |
-| V18A_QUALITY_FLOOR | 40 | qScore100 must be >= 40 to submit |
+| V18A_QUALITY_FLOOR | 50 | qScore100 must be >= 50 to submit |
 
 ### MNQ vs NQ
 
@@ -253,7 +253,7 @@ Plus ±1 for persistent absorption (3+ consecutive abs-buy or abs-sell bars). St
 - **Daily Loss:** Flatten + halt when session P&L <= `-Daily Loss $`; logged as `DAILY_LOSS`
 - **Daily Profit:** Flatten + halt when session P&L >= `Daily Profit Target $`; logged as `DAILY_PROFIT`
 - **Max trades:** Hard stop at 6 trades/day (configurable)
-- **Flatten time:** All positions closed at `Flatten HHMM` (default 16:55)
+- **Flatten time:** All positions closed at `Flatten HHMM` (default 15:55)
 
 ### Risk Multiplier
 Computed each bar; clamps position sizing between 0.10x and 2.00x:
@@ -297,7 +297,7 @@ All of these must pass before an order is submitted:
 |------|-----------|-----------|
 | Bar-close | Entry only on a **completed** bar (`BarClosed = true`) | Silent |
 | Session DD | `sessionDrawdown > 80%` of daily loss budget | SKIP log |
-| Consecutive loss | `ConsecLoss >= C_MAX_LOSSES (3)` — hard block, not just sizing | SKIP log |
+| Consecutive loss | `ConsecLoss >= C_MAX_LOSSES (2)` — hard block, not just sizing | SKIP log |
 | RM floor | `riskMultiplier < 0.60` | SKIP log |
 | Regime filter | Mode blocked by trend/chop/vol state | GATE CSV |
 | V1 hooks | Confirmation or chop gate fails | V1HOOK log |
@@ -512,7 +512,7 @@ IOF_NQ_Production_Final/
 | No orders submitted during replay | Old gate blocked replay submissions | Rebuild with v12.11+ |
 | DLL name mismatch on load | Source rename without updating SCDLLName | Run VERIFY_PRODUCTION_BUNDLE.ps1 |
 | Duplicate SETUP rows in CSV | First-bar LRU warmup; expected behavior | LRU covers last 10 MB of log |
-| All entries skipped after 3 losses | ConsecLoss >= C_MAX_LOSSES=3 hard gate | Expected; resets on winning trade or session reset |
+| All entries skipped after 2 losses | ConsecLoss >= C_MAX_LOSSES=2 hard gate | Expected; resets on winning trade or session reset |
 | Entries skipped with SKIP DD log | sessionDrawdown > 80% of daily budget | Expected; tighter than the full daily loss cap |
 | M8 firing but qScore too low | pFade->active is false; falls to /15 scale | Verify Fade Engine input = 1; check EVAL log for edgeScore |
 | M7 never fires despite imbalance | trendStrength > 5.0 or rvVerifyScore < 5 | Check regime GATE logs; review imbalance strength |
