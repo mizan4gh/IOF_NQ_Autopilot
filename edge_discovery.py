@@ -15,7 +15,7 @@ Features (per RTH bar):
   dist_vah_atr   = (session_VAH - close) / ATR
   dist_val_atr   = (session_VAL - close) / ATR
   edge_signal    = ±1 when |dist_vwap_atr|>=SIG_DIST and |cum_delta_z|>=SIG_Z
-                   and both agree in direction
+                   and both agree in direction and bar within 10:05–14:55 ET
 
 Usage:
   python edge_discovery.py                                   # NQZ5 default
@@ -55,6 +55,8 @@ PACE_LB     = 3          # lookback for pace_ref (mean |delta|)
 VA_PCT      = 0.70       # value area fraction (70%)
 SIG_DIST    = 0.35       # |dist_vwap_atr| threshold for edge_signal
 SIG_Z       = 1.0        # |cum_delta_z| threshold for edge_signal
+SIG_TIME_START = 1005    # earliest HHMM for edge_signal (skip first 30 min open)
+SIG_TIME_END   = 1455    # latest  HHMM for edge_signal (skip last 60 min close)
 
 TICK        = 0.25       # NQ tick size
 
@@ -334,7 +336,8 @@ def compute_features(bars: List[Bar]) -> List[FeatureRow]:
 
         # Edge signal (mirrors C++ IN_ShowSignal logic)
         edge_signal = 0
-        if abs(dist_vwap_atr) >= SIG_DIST and abs(cum_delta_z) >= SIG_Z:
+        if (abs(dist_vwap_atr) >= SIG_DIST and abs(cum_delta_z) >= SIG_Z
+                and SIG_TIME_START <= bar.hhmm <= SIG_TIME_END):
             if dist_vwap_atr * cum_delta_z > 0:   # same sign = aligned
                 edge_signal = 1 if dist_vwap_atr > 0 else -1
 
