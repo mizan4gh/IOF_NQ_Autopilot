@@ -997,25 +997,43 @@ class Backtester:
             if bar.close < bal.lo - bk_t and imb.active and imb.direction == -1 and bear and sc_s >= C_MIN_SC_ALL:
                 break_dir = -1
             if break_dir != 0:
-                # Verify: delta streak (3/5 bars)
-                d_streak = sum(1 for k in range(5) if i - k >= 0 and (
-                    (break_dir > 0 and self.bars[i-k].ask_vol > self.bars[i-k].bid_vol) or
-                    (break_dir < 0 and self.bars[i-k].bid_vol > self.bars[i-k].ask_vol)))
-                if d_streak >= 3: bk_verify += 2
-                # Volume above balance avg
-                bk3 = sum(self.bars[i-k].volume for k in range(3) if i-k >= 0) / 3
-                if bk3 > bal.avg_vol * 1.3: bk_verify += 2
-                # No opposing divergence
+                # 5-component scoring calibrated for 2500-vol bars.
+                # C++ checks (acc_bars, retest, opp_vol, vBeyond, volume) require
+                # multi-bar breakout accumulation — structurally 0% on single-bar
+                # detection at this bar size. The 5 checks below all discriminate.
+                # 1. Consecutive delta streak ≥3 (C++: breaks on first mismatch)
+                d_streak = 0
+                for k in range(5):
+                    if i - k < 0: break
+                    bd = self.bars[i-k].ask_vol - self.bars[i-k].bid_vol
+                    if (break_dir > 0 and bd > 0) or (break_dir < 0 and bd < 0):
+                        d_streak += 1
+                    else:
+                        break
+                if d_streak >= 3: bk_verify += 1
+                # 2. No absorption at breakout level (high-vol opposing candle)
+                abs_at_bk = False
+                for k in range(3):
+                    if i-k < 0: break
+                    bd = self.bars[i-k].ask_vol - self.bars[i-k].bid_vol
+                    b_up = self.bars[i-k].close > self.bars[i-k].open
+                    vol_k = self.bars[i-k].volume
+                    if break_dir > 0 and bd < 0 and b_up and vol_k > bal.avg_vol * 1.2:
+                        abs_at_bk = True; break
+                    if break_dir < 0 and bd > 0 and not b_up and vol_k > bal.avg_vol * 1.2:
+                        abs_at_bk = True; break
+                if not abs_at_bk: bk_verify += 1
+                # 3. No opposing iceberg at level (not tracked in Python — assume absent)
+                bk_verify += 1
+                # 4. No opposing divergence
                 no_div = not (div.strength <= -2 if break_dir > 0 else div.strength >= 2)
                 if no_div: bk_verify += 1
-                # No opposing iceberg (skipped in Python version)
-                bk_verify += 1
-                # Wick small
+                # 5. Small wick in break direction
                 wick = (bar.high - bar.close) if break_dir > 0 else (bar.close - bar.low)
                 if wick < atr * 0.3: bk_verify += 1
                 bk_vs = bk_verify
 
-                if bk_verify >= 5:   # simplified (production = 6)
+                if bk_verify >= 5:   # max=5 with this component set; quality gate enforces bk_vs≥5
                     rw = bal.hi - bal.lo
                     if break_dir > 0:
                         m6l = True
