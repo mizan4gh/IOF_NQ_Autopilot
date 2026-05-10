@@ -70,7 +70,7 @@ SCID_DTYPE = np.dtype([
 # ─────────────────────────────────────────────────────────────────────────────
 #  CONSTANTS  (mirror C++ hardcodes in IOF_NQ_Autopilot.cpp)
 # ─────────────────────────────────────────────────────────────────────────────
-TARGET_VOL   = 2500          # contracts per bar
+TARGET_VOL   = 3000          # contracts per bar
 RTH_OPEN     = 935           # 09:35 ET
 FLATTEN_HHMM = 1555          # 15:55 ET  (inlined .cpp default)
 
@@ -98,14 +98,11 @@ C_DELTA_MAT  = 25
 C_CONSOL_LB  = 25
 C_CONSOL_ATR = 1.5
 C_SWEEP_LB   = 15
-C_M5_COOL       = 30
-C_M5_MIN_SC     = 5
-C_M5_PHASE3_MAX = 20
 C_MAX_LOSSES = 2
 C_STRUCT_LB  = 25
 
-DAILY_LOSS   = 1000.0
-DAILY_PROF   = 1000.0
+DAILY_LOSS   = 800.0
+DAILY_PROF   = 0.0           # 0 = disabled (no profit cap)
 MAX_TRADES   = 6
 TICK         = 0.25
 PT_VAL       = 20.0          # NQ: $20/point ($5/tick)
@@ -478,7 +475,7 @@ TB_MAX = 0.35   # trap body max ratio (C++ pAT->trapBodyMax() default)
 
 @dataclass
 class Trap:
-    phase:            int   = 0    # 0=inactive 1=commit 2=absorb 3=armed
+    phase:            int   = 0    # 0=inactive 1=commit 2=absorb
     direction:        int   = 0    # +1=bull-trap, -1=bear-trap
     valid:            bool  = False
     commit_start_bar: int   = -1
@@ -490,14 +487,13 @@ class Trap:
     absorb_px:        float = 0.0
     stop_target:      float = 0.0
     entry_px:         float = 0.0
-    phase3_bar:       int   = -1
 
     def reset(self):
         self.phase = 0; self.direction = 0; self.valid = False
         self.commit_start_bar = -1; self.commit_bars = 0; self.commit_delta = 0.0
         self.commit_high = 0.0; self.commit_low = 0.0
         self.absorb_bar = -1; self.absorb_px = 0.0
-        self.stop_target = 0.0; self.entry_px = 0.0; self.phase3_bar = -1
+        self.stop_target = 0.0; self.entry_px = 0.0
 
 def update_trap(trap: Trap, bars: List[Bar], i: int, atr: float) -> Trap:
     if i < 2 or atr <= 0:
@@ -574,22 +570,10 @@ def update_trap(trap: Trap, bars: List[Bar], i: int, atr: float) -> Trap:
                 trap.commit_bars  += 1; trap.commit_delta += bar_d
                 if b.low < trap.commit_low: trap.commit_low = b.low
 
-    # ── Phase 2: look for reversal breakout ──────────────────────────────────
+    # ── Phase 2: absorption — timeout after 3 bars (feeds M4 scoring) ───────
     if trap.phase == 2:
         if i > trap.absorb_bar + 3:
             trap.reset()
-        elif trap.direction == +1:
-            if b.close < trap.absorb_px - atr * 0.15 and bar_d < 0 and bar_bear:
-                trap.phase = 3; trap.valid = True; trap.entry_px = b.close; trap.phase3_bar = i
-        elif trap.direction == -1:
-            if b.close > trap.absorb_px + atr * 0.15 and bar_d > 0 and bar_bull:
-                trap.phase = 3; trap.valid = True; trap.entry_px = b.close; trap.phase3_bar = i
-
-    # ── Phase 3: armed — reset if stale or price reclaims absorption level ───
-    if trap.phase == 3:
-        if trap.direction == +1 and b.close > trap.absorb_px: trap.reset()
-        elif trap.direction == -1 and b.close < trap.absorb_px: trap.reset()
-        elif trap.phase3_bar >= 0 and i > trap.phase3_bar + C_M5_PHASE3_MAX: trap.reset()
 
     return trap
 
@@ -823,7 +807,6 @@ class Backtester:
         self.last_loss_bar  = -1
         self.last_stop_bar  = -1
         self.last_stop_dir  = 0
-        self.last_m5_bar    = -1
         self.prev_imb_dir   = 0
         self.prev_imb_str   = 0
         self.prev_imb_ext   = 0.0
@@ -872,8 +855,7 @@ class Backtester:
             self.day_trades = 0
             self.day_done   = False
             self.risk.day_reset()
-            self.trap.reset()        # C++: pTrap->reset() on day rollover
-            self.last_m5_bar = -1   # C++: LastM5Bar=-1 on day rollover
+            self.trap.reset()
 
         # ── RTH + flatten ────────────────────────────────────────────────────
         if bar.hhmm >= FLATTEN_HHMM:
@@ -930,7 +912,7 @@ class Backtester:
 
         # ── Modes ────────────────────────────────────────────────────────────
         m2l = m2s = m3l = m3s = m4l = m4s = False
-        m5l = m5s = m6l = m6s = m7l = m7s = m8l = m8s = False
+        m6l = m6s = m7l = m7s = m8l = m8s = False
         m6_sp = m6_t1 = m6_t2 = 0.0
         m7_sp = 0.0
         fade_active = False; fade_edge = fade_type = 0
@@ -974,21 +956,6 @@ class Backtester:
                 m4l = True
             if m4_vwap_edge and bar.high > sw_hi + TICK and bar.close < sw_hi and bear and sc_s >= m4_min and ctrl <= 0:
                 m4s = True
-
-        # M5 — Trap reversal
-        lb_delta = self.cum_d[i] - self.cum_d[max(0, i - 15)]
-        avg_d    = self.avg_d[i]   # EMA-64 of |bar_delta|, mirrors C++ SG_ADELT
-        if self.trap.valid and self.trap.phase == 3:
-            cool = self.last_m5_bar < 0 or i > self.last_m5_bar + C_M5_COOL
-            # [EdgeDiscovery] gate: lookback cumulative delta ≥3× avg bar delta
-            m5_delta_edge = abs(lb_delta) >= avg_d * 3.0
-            if cool and m5_delta_edge:
-                if self.trap.direction == +1 and sc_s >= C_M5_MIN_SC and ctrl <= 0:
-                    m5s = True
-                if self.trap.direction == -1 and sc_l >= C_M5_MIN_SC and ctrl >= 0:
-                    m5l = True
-                if m5l or m5s:
-                    self.last_m5_bar = i
 
         # M6 — Balance breakout
         bk_vs = 10  # mirrors C++ bkVerifyScore=10; stays 10 if no breakout so M8 gate (<=4) stays closed
@@ -1105,12 +1072,10 @@ class Backtester:
                     fd_sp = bar.low - atr * 0.3
                     fd_t1 = bal.poc; fd_t2 = bal.hi
 
-        # ── Priority selection (M4, M5, M6 only) ─────────────────────────────
+        # ── Priority selection (M4, M6 only) ─────────────────────────────────
         sel = -1; sl = False
         if   m6l: sel = 5; sl = True
         elif m6s: sel = 5
-        elif m5l: sel = 4; sl = True
-        elif m5s: sel = 4
         elif m4l: sel = 3; sl = True
         elif m4s: sel = 3
         if sel < 0: return
@@ -1131,7 +1096,7 @@ class Backtester:
 
         # ── Quality score ─────────────────────────────────────────────────────
         # M1/M2/M3: (finalScore*100)/15 — need score >= 6 to clear floor 40.
-        # M4/M5/M7: finalScore*10 — Python sc max=5, needs sc>=5.
+        # M4/M7: finalScore*10 — Python sc max=5, needs sc>=5.
         # M6: use bk_vs (bkVerifyScore) directly — the mode-specific quality
         #     measure. bk_vs*10 maps 5→50, 6→60; C++ scL/scS achieves this
         #     via 12-component score which Python doesn't replicate.

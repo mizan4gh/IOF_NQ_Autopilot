@@ -2,7 +2,7 @@
 //  IOF NQ — Pure Orderflow Autopilot
 //  Sierra Chart ACSIL Study
 //
-//  Version: v12.20 (May 2026; M5 phase-3 reclaim+timeout, ctrl gate, no LB fallback)
+//  Version: v12.21 (May 2026; M5 mode removed — backtest showed persistent regime-dependent losses)
 //
 //  CHANGES SINCE v11:
 //    [v12.1] RM floor 0.80 -> 0.60, Kelly cold-start 0.8 -> 0.9.
@@ -95,6 +95,12 @@
 //                 (DL/DS). LBL/LBS fallback made entry bar ambiguous.
 //             (d) controlScore gate narrowed: ±2 → 0. Requires neutral/correct-side
 //                 control at entry bar, not just "not strongly opposing".
+//
+//    [v12.21] M5 (Trap Reversal) mode removed entirely.
+//             3000-vol-bar backtest (NQZ5 2025, NQH26 2026) showed M5 generated
+//             70-90% of all trades at 12-26% WR across both regimes. M6 and M4
+//             remain. TrapState struct retained (phases 0-2 feed M4 scoring via
+//             S11/trapConf); phase-3 progression and all M5 signal logic removed.
 //
 //    [v12.19] Default daily caps: $1000 loss / $1000 profit (iof_unified defaults).
 //             ATR: clarified volume-bar semantics; floor when SG_ATR<=0 (warmup/edge).
@@ -565,9 +571,6 @@ static const int   C_CONSOL_LB      = 25;
 static const float C_CONSOL_ATR     = 1.5f;
 static const int   C_SWEEP_LB       = 15;
 static const int   C_SPIKE_COOL     = 20;
-static const int   C_M5_MIN_SC      = 5;
-static const int   C_M5_COOLDOWN    = 30;
-static const int   C_M5_PHASE3_MAX  = 20;
 static const float C_SPIKE_ATR_M    = 3.0f;
 static const int   C_DELTA_MATURE   = 25;
 static const float C_VCOOL_THRESH   = 7.0f;
@@ -766,7 +769,7 @@ static void WriteCSV(SCStudyInterfaceRef& sc, const char* Evt, const char* Side,
               "%d,%d,%.0f,%.2f,"
               "%.2f,%s,%d,%.2f,%.2f,"
               "%.2f,%.2f,%d,%d,"
-              "%.2f,%d,%d,%d,v12.20,%llu\n",
+              "%.2f,%d,%d,%d,v12.21,%llu\n",
         Y,Mo,D,Hr,Mi,Se,Evt,Side,Mode,Entry,SL,TP1,TP2,Qty,Score,
         CtrlSc,DivStr,Delta,BarSpd,
         ExitPx,ExitR,Hold,MAE,MFE,
@@ -962,8 +965,8 @@ struct VPState {
 struct IcebergState{bool bidIceberg,askIceberg;float bidIcebergPx,askIcebergPx,bidIcebergVol,askIcebergVol;int bidIcebergBars,askIcebergBars;
     void reset(){bidIceberg=askIceberg=false;bidIcebergPx=askIcebergPx=0.f;bidIcebergVol=askIcebergVol=0.f;bidIcebergBars=askIcebergBars=0;}};
 
-struct TrapState{int phase,direction,commitStartBar,commitBars;float commitDelta,commitHigh,commitLow,absorbPx;int absorbBar,phase3Bar;float stopTarget,entryPx;bool valid;
-    void reset(){phase=0;direction=0;commitStartBar=-1;commitBars=0;commitDelta=0.f;commitHigh=0.f;commitLow=0.f;absorbPx=0.f;absorbBar=-1;phase3Bar=-1;stopTarget=0.f;entryPx=0.f;valid=false;}};
+struct TrapState{int phase,direction,commitStartBar,commitBars;float commitDelta,commitHigh,commitLow,absorbPx;int absorbBar;float stopTarget,entryPx;bool valid;
+    void reset(){phase=0;direction=0;commitStartBar=-1;commitBars=0;commitDelta=0.f;commitHigh=0.f;commitLow=0.f;absorbPx=0.f;absorbBar=-1;stopTarget=0.f;entryPx=0.f;valid=false;}};
 
 struct BalanceState{bool active,mature;float rangeHigh,rangeLow,rangePOC,volumeTotal,vpConcentration,cumDelta;int barCount,deltaFlips;
     void reset(){active=false;mature=false;rangeHigh=rangeLow=rangePOC=0.f;volumeTotal=0.f;barCount=0;deltaFlips=0;cumDelta=0.f;vpConcentration=0.f;}};
@@ -1527,8 +1530,8 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
 
     if(sc.SetDefaults){
         sc.GraphName="IOF NQ Autopilot";
-        sc.StudyDescription="IOF NQ Pure Orderflow (Apr 2026). "
-            "v12.20: M5 phase-3 timeout+reclaim, ctrl gate 0, no LB fallback. Optional V1 hooks. "
+        sc.StudyDescription="IOF NQ Pure Orderflow (May 2026). "
+            "v12.21: M5 (Trap Reversal) removed — regime-dependent losses. Active modes: M4 M6 M7 M8. "
             "RM floor 0.60, Quality floor 50, M1 toggleable. "
             "1 contract only (Sierra max position + input clamp). "
             "Defaults: daily loss cap $1000, profit lock $1000 (inputs). "
@@ -1675,9 +1678,7 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
     int& LastSigBar     = sc.GetPersistentInt(PI_LastSigBar);
     int& VWAPBars       = sc.GetPersistentInt(PI_VWAPBars);
     int& T1HitBar       = sc.GetPersistentInt(PI_T1HitBar);
-    int& LastM5Bar      = sc.GetPersistentInt(PI_LastM5Bar);
     int& LastSkipLogBar  = sc.GetPersistentInt(PI_LastSkipLogBar);
-    int& LastM5LogBar    = sc.GetPersistentInt(PI_LastM5LogBar);
     int& LastBlockLogBar = sc.GetPersistentInt(PI_LastBlockLogBar);
     int& LastVPBar       = sc.GetPersistentInt(PI_LastVPBar);
     int& LastCalcBar     = sc.GetPersistentInt(PI_LastCalcBar);
@@ -1793,7 +1794,7 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
     if(!BannerShown && DIAG) {
         InitRunID();
         SCString m;
-        m.Format("=== V18A v12.20 LOAD sym=%s tick=%.4f tickval=$%.2f Cap=$%.0f DailyLoss=$%.0f DailyProf=$%.0f "
+        m.Format("=== V18A v12.21 LOAD sym=%s tick=%.4f tickval=$%.2f Cap=$%.0f DailyLoss=$%.0f DailyProf=$%.0f "
                  "MaxTr=%d FlatT=%d Qty=%d Live=%d Regime=%d Fade=%d News=%d AutoDis=%d M1=%d V1hooks=%d "
                  "RM_FLOOR=%.2f QUAL_FLOOR=%d CD_trd=%d CD_loss=%d CD_stop=%d RunID=%llu ===",
             sc.Symbol.GetChars(), TICK, TICK_VAL, Capital, DAILY_LOSS, DAILY_PROF,
@@ -2027,7 +2028,7 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
         }
         LiveTradeDir=0;
         ConsecLoss=0; LastExitWasLoss=0; LastSigBar=-1;
-        LastM5Bar=-1; LastSkipLogBar=-1; LastM5LogBar=-1; LastBlockLogBar=-1;
+        LastSkipLogBar=-1; LastBlockLogBar=-1;
         LastVPBar=-1; LastCalcBar=-1;
         LastStopBar=-1; LastStopDir=0;
         FlattenReason=FR_NONE;
@@ -2711,21 +2712,6 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
         }
         if(pTrap->phase==2){
             if(Idx>pTrap->absorbBar+3){pTrap->reset();}
-            else if(pTrap->direction==+1){
-                if(Close0<pTrap->absorbPx-ATR*0.15f&&barD<0.f&&barBearish){
-                    pTrap->phase=3; pTrap->valid=true; pTrap->entryPx=Close0; pTrap->phase3Bar=Idx;
-                }
-            } else if(pTrap->direction==-1){
-                if(Close0>pTrap->absorbPx+ATR*0.15f&&barD>0.f&&barBullish){
-                    pTrap->phase=3; pTrap->valid=true; pTrap->entryPx=Close0; pTrap->phase3Bar=Idx;
-                }
-            }
-        }
-        // [v12.20] Phase-3 reclaim reset + timeout
-        if(pTrap->phase==3){
-            if(pTrap->direction==+1&&Close0>pTrap->absorbPx) pTrap->reset();
-            else if(pTrap->direction==-1&&Close0<pTrap->absorbPx) pTrap->reset();
-            else if(pTrap->phase3Bar>=0&&Idx>pTrap->phase3Bar+C_M5_PHASE3_MAX) pTrap->reset();
         }
     }
 
@@ -2900,32 +2886,6 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
             int es=DS?scS:lbScS;
             bool iceBlock=(pIce&&pIce->bidIceberg&&FAbs(pIce->bidIcebergPx-swHi)<=ATR*0.5f);
             if(es>=M4_MIN_SCORE&&!iceBlock) m4S=true;
-        }
-    }
-
-    // ============================================================================
-    //  M5 — TRAP REVERSAL
-    // ============================================================================
-    bool m5L=false, m5S=false;
-    if(pTrap&&pTrap->valid&&pTrap->phase==3){
-        bool m5CoolOK=(C_M5_COOLDOWN<=0)||(LastM5Bar<0)||(Idx>LastM5Bar+C_M5_COOLDOWN);
-        // [EdgeDiscovery] Require lookback cumulative delta to be at least 3× the
-        // average single-bar delta — confirms sustained directional flow built the trap.
-        bool m5DeltaEdge=(FAbs(lbDelta)>=avgD*3.0f);
-        if(m5CoolOK&&m5DeltaEdge){
-            // [v12.20] Require current-bar delta alignment; no lookback fallback
-            int m5ScL=DL?scL:0;
-            int m5ScS=DS?scS:0;
-            // [v12.20] controlScore narrowed ±2 → 0
-            if(pTrap->direction==+1){if(m5ScS>=C_M5_MIN_SC&&controlScore<=0) m5S=true;}
-            if(pTrap->direction==-1){if(m5ScL>=C_M5_MIN_SC&&controlScore>=0) m5L=true;}
-            // [v12.14] Mark the bar M5 armed on, regardless of whether this signal
-            //          ultimately becomes an entry. Without this, LastM5Bar stays at
-            //          -1 forever and M5 re-arms every single bar that trap phase==3
-            //          is active (~6-21 times per day). That spam caused M5 to win
-            //          same-bar priority over M4 but rarely land on a submittable bar
-            //          during replay. Result: 1064 M5 SETUPs / 0 ENTRYs.
-            if(m5L || m5S) LastM5Bar = Idx;
         }
     }
 
@@ -3185,14 +3145,14 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
             (pFade && pFade->active));
         SCString em;
         em.Format("[V18A EVAL] %02d:%02d scL=%d scS=%d ctrl=%d div=%d "
-                  "m1=%d%d m2=%d%d m3=%d%d m4=%d%d m5=%d%d m6=%d%d m7=%d%d m8=%d%d "
+                  "m1=%d%d m2=%d%d m3=%d%d m4=%d%d m6=%d%d m7=%d%d m8=%d%d "
                   "RM=%.2f Q~%d trend=%d chop=%d CL=%d",
             BarHHMM/100, BarHHMM%100,
             DL?scL:(LBL?lbScL:0), DS?scS:(LBS?lbScS:0),
             controlScore, pDiv?pDiv->strength:0,
             m1L?1:0, m1S?1:0, m2L?1:0, m2S?1:0,
             m3L?1:0, m3S?1:0, m4L?1:0, m4S?1:0,
-            m5L?1:0, m5S?1:0, m6L?1:0, m6S?1:0,
+            m6L?1:0, m6S?1:0,
             m7L?1:0, m7S?1:0, m8L?1:0, m8S?1:0,
             pRisk?pRisk->riskMultiplier:1.0f, q_preview,
             pRegime?pRegime->trendRegime:0,
@@ -3204,21 +3164,19 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
     // ============================================================================
     //  SIGNAL COMBINATION
     // ============================================================================
-    bool goL=m1L||m2L||m3L||m4L||m5L||m6L||m7L||m8L;
-    bool goS=m1S||m2S||m3S||m4S||m5S||m6S||m7S||m8S;
+    bool goL=m1L||m2L||m3L||m4L||m6L||m7L||m8L;
+    bool goS=m1S||m2S||m3S||m4S||m6S||m7S||m8S;
     if(!goL&&!goS) return;
 
     int selMode=-1;
     bool selLong=false;
-    // priority: M6 > M7 > M8 (fade) > M5 (trap) > M4 > M3 > M2 > M1
+    // priority: M6 > M7 > M8 (fade) > M4 > M3 > M2 > M1
     if(m6L){selMode=5; selLong=true;}
     else if(m6S){selMode=5; selLong=false;}
     else if(m7L){selMode=6; selLong=true;}
     else if(m7S){selMode=6; selLong=false;}
     else if(m8L){selMode=7; selLong=true;}
     else if(m8S){selMode=7; selLong=false;}
-    else if(m5L){selMode=4; selLong=true;}
-    else if(m5S){selMode=4; selLong=false;}
     else if(m4L){selMode=3; selLong=true;}
     else if(m4S){selMode=3; selLong=false;}
     else if(m3L){selMode=2; selLong=true;}
