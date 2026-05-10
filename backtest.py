@@ -869,6 +869,8 @@ class Backtester:
             self.day_trades = 0
             self.day_done   = False
             self.risk.day_reset()
+            self.trap.reset()        # C++: pTrap->reset() on day rollover
+            self.last_m5_bar = -1   # C++: LastM5Bar=-1 on day rollover
 
         # ── RTH + flatten ────────────────────────────────────────────────────
         if bar.hhmm >= FLATTEN_HHMM:
