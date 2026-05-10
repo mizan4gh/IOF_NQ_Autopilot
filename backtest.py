@@ -132,6 +132,15 @@ class Bar:
 # ─────────────────────────────────────────────────────────────────────────────
 #  SCID READER
 # ─────────────────────────────────────────────────────────────────────────────
+def detect_price_scale(path: str) -> float:
+    """Return 100.0 for non-dash-CME Sierra Chart files (prices stored ×100)."""
+    name = os.path.basename(path).upper()
+    # Dash-CME files (e.g. NQZ25-CME.scid, NQH26-CME.scid) use normal prices.
+    # Non-dash files (e.g. NQZ5.CME.scid) store prices ×100.
+    if "-CME" in name:
+        return 1.0
+    return 100.0
+
 def read_scid(path: str) -> np.ndarray:
     with open(path, "rb") as f:
         hdr_raw = f.read(SCID_HDR_SIZE)
@@ -149,11 +158,13 @@ def read_scid(path: str) -> np.ndarray:
 # ─────────────────────────────────────────────────────────────────────────────
 #  VOLUME BAR AGGREGATOR
 # ─────────────────────────────────────────────────────────────────────────────
-def build_volume_bars(recs: np.ndarray, target_vol: int = TARGET_VOL) -> List[Bar]:
+def build_volume_bars(recs: np.ndarray, target_vol: int = TARGET_VOL,
+                      price_scale: float = 1.0) -> List[Bar]:
     """
     Aggregates .scid tick records into fixed-volume bars.
     Sierra Chart SCDateTime = int64 microseconds since 1899-12-30 00:00:00 UTC.
     RTH filter uses US/Eastern local time.
+    price_scale: divide raw prices by this factor (100.0 for non-dash-CME files).
     """
     bars: List[Bar] = []
     bar_idx = 0
@@ -170,10 +181,10 @@ def build_volume_bars(recs: np.ndarray, target_vol: int = TARGET_VOL) -> List[Ba
         sc_us = int(rec["dt"])
         dt_utc = SC_EPOCH_UTC + timedelta(microseconds=sc_us)
         dt    = dt_utc.astimezone(ET)          # local ET (handles DST)
-        rc    = float(rec["close"])
-        rh    = float(rec["high"])
-        rl    = float(rec["low"])
-        ro_raw = float(rec["open"])
+        rc    = float(rec["close"])  / price_scale
+        rh    = float(rec["high"])   / price_scale
+        rl    = float(rec["low"])    / price_scale
+        ro_raw = float(rec["open"]) / price_scale
         # For ask-side ticks open is 0 or non-finite; use close as bar open instead
         ro    = rc if (not math.isfinite(ro_raw) or ro_raw == 0.0) else ro_raw
         bv, av = int(rec["bid_vol"]), int(rec["ask_vol"])
@@ -1429,7 +1440,10 @@ def print_summary(trades: List[Trade]):
 # ─────────────────────────────────────────────────────────────────────────────
 def main():
     scid = sys.argv[1] if len(sys.argv) > 1 else SCID_PATH
-    out  = sys.argv[2] if len(sys.argv) > 2 else OUT_CSV
+    # Default output CSV name derived from input filename
+    stem = os.path.splitext(os.path.basename(scid))[0]
+    default_out = os.path.join(BASE_DIR, f"IOF_NQ_backtest_{stem}.csv")
+    out  = sys.argv[2] if len(sys.argv) > 2 else default_out
 
     # Extract if still zipped
     if not os.path.exists(scid) and os.path.exists(ZIP_PATH):
@@ -1441,15 +1455,16 @@ def main():
     if not os.path.exists(scid):
         print(f"ERROR: {scid} not found."); sys.exit(1)
 
+    scale = detect_price_scale(scid)
     fsize = os.path.getsize(scid)
     nrecs = (fsize - SCID_HDR_SIZE) // SCID_REC_SIZE
     print(f"Reading {scid}")
-    print(f"  File size: {fsize/1e9:.2f} GB  ({nrecs:,} records)")
+    print(f"  File size: {fsize/1e9:.2f} GB  ({nrecs:,} records)  price_scale=÷{scale:.0f}")
     recs = read_scid(scid)
     print(f"  Loaded {len(recs):,} records.")
 
     print(f"Building {TARGET_VOL}-contract volume bars ...")
-    bars = build_volume_bars(recs)
+    bars = build_volume_bars(recs, price_scale=scale)
     rth  = [b for b in bars if b.hhmm >= RTH_OPEN and b.hhmm < FLATTEN_HHMM]
     print(f"  Total bars: {len(bars):,}  |  RTH bars: {len(rth):,}")
 
