@@ -2,7 +2,7 @@
 //  IOF NQ — Pure Orderflow Autopilot
 //  Sierra Chart ACSIL Study
 //
-//  Version: v12.19 (Apr 2026 production; optional V1 hooks + iof_v1_hooks.h)
+//  Version: v12.20 (May 2026; M5 phase-3 reclaim+timeout, ctrl gate, no LB fallback)
 //
 //  CHANGES SINCE v11:
 //    [v12.1] RM floor 0.80 -> 0.60, Kelly cold-start 0.8 -> 0.9.
@@ -1528,7 +1528,7 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
     if(sc.SetDefaults){
         sc.GraphName="IOF NQ Autopilot";
         sc.StudyDescription="IOF NQ Pure Orderflow (Apr 2026). "
-            "v12.19 fixes + optional V1-style hooks (confirmations / chop / R-Sharpe tighten). "
+            "v12.20: M5 phase-3 timeout+reclaim, ctrl gate 0, no LB fallback. Optional V1 hooks. "
             "RM floor 0.60, Quality floor 50, M1 toggleable. "
             "1 contract only (Sierra max position + input clamp). "
             "Defaults: daily loss cap $1000, profit lock $1000 (inputs). "
@@ -1793,7 +1793,7 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
     if(!BannerShown && DIAG) {
         InitRunID();
         SCString m;
-        m.Format("=== V18A v12.19 LOAD sym=%s tick=%.4f tickval=$%.2f Cap=$%.0f DailyLoss=$%.0f DailyProf=$%.0f "
+        m.Format("=== V18A v12.20 LOAD sym=%s tick=%.4f tickval=$%.2f Cap=$%.0f DailyLoss=$%.0f DailyProf=$%.0f "
                  "MaxTr=%d FlatT=%d Qty=%d Live=%d Regime=%d Fade=%d News=%d AutoDis=%d M1=%d V1hooks=%d "
                  "RM_FLOOR=%.2f QUAL_FLOOR=%d CD_trd=%d CD_loss=%d CD_stop=%d RunID=%llu ===",
             sc.Symbol.GetChars(), TICK, TICK_VAL, Capital, DAILY_LOSS, DAILY_PROF,
