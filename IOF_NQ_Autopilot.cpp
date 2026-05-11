@@ -1608,6 +1608,56 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
         SG_EMAF.Name="V1 EMA fast (internal)"; SG_EMAF.DrawStyle=DRAWSTYLE_IGNORE;
         SG_EMAS.Name="V1 EMA slow (internal)"; SG_EMAS.DrawStyle=DRAWSTYLE_IGNORE;
 
+        // ====================================================================
+        //  APEX TRADER FUNDING — $150K EVAL ACCOUNT PROFILE  [v12.24]
+        // ====================================================================
+        //  Account math:
+        //    Starting balance ........ $150,000
+        //    Trailing drawdown ....... $5,000 (EOD trailing)
+        //    Profit target to pass ... +$9,000
+        //    Half-size scaling rule .. trade <= half max until +$3K above start
+        //    Max contracts (post +3K)  ~15 NQ minis
+        //    Apex flat-by-rule ....... 4:59 PM ET (we use 15:55 as buffer)
+        //
+        //  The SetDefaults below are PHASE 1 — survival-first while the $5K
+        //  trailing DD is at its tightest and scaling rules force half-size.
+        //  Promote to PHASE 2 only after the conditions in the table below.
+        //
+        //  ─── PHASE 1 — DEFAULTS BELOW (balance < $153K) ─────────────────────
+        //    Quantity           : 1
+        //    Daily Loss $       : 1000        (allows ~2 stops; 5-day cushion)
+        //    Daily Profit $     : 0 (off)     (don't truncate right-tail days)
+        //    Max Trades         : 3
+        //    News Filter        : 1 (ON)
+        //    Entry Order        : 2 (lmt+2t)
+        //    Session Start      : 0 (RTH only)
+        //
+        //  ─── PHASE 2 — ENTER ONLY WHEN ALL OF THESE HOLD ─────────────────────
+        //    1. Balance >= $153,000 (Apex full-size unlocked)
+        //    2. >= 30 live trades completed
+        //    3. Live profit factor > 1.5 over those 30 trades
+        //    4. No unresolved EXTERNAL exits in the journal
+        //  Then change:
+        //    IN_TOTQTY          : 1   ->  2   (cautious step; NOT 5+)
+        //    IN_DAILY_LOSS      : 1000 -> 1500 (~2 stops @ 2 contracts)
+        //  Leave Max Trades, News Filter, Entry Ord, Session Start unchanged.
+        //
+        //  ─── PHASE 3 — APPROACHING PASS (balance >= $156K) ──────────────────
+        //  Trailing DD floor is now $151K — a real buffer above starting bal.
+        //  STAY at Phase 2 settings; do NOT scale to 3+ contracts. The math
+        //  doesn't need it: 2 contracts x backtest edge = ~$6K / 5 months,
+        //  which buys the last $3K to pass in ~2.5 months. Speed isn't worth
+        //  blowup risk at the finish line.
+        //
+        //  ─── DO NOT ─────────────────────────────────────────────────────────
+        //    - Scale past 2 contracts during eval (even though Apex allows 15)
+        //    - Enable Daily Profit cap (cuts the M6 outlier days that fund PF)
+        //    - Trade through FOMC / NFP / earnings (disable strategy manually)
+        //    - Enable overnight session (SESSION_START=100) — untested
+        //    - Trust passing pace > backtest's +$3K / 5 months at 1 contract.
+        //      Median expected pass time ~10-14 months. Plan accordingly.
+        // ====================================================================
+
         IN_LIVE.Name="Enable Auto Trading (1=live orders)"; IN_LIVE.SetInt(1);
         IN_CAPITAL.Name="Account Capital ($)"; IN_CAPITAL.SetFloat(150000.0f);  // [v12.24] Apex $150K eval
         IN_DAILY_LOSS.Name="Daily Loss $ (drives risk budget)"; IN_DAILY_LOSS.SetFloat(iof_unified::kDefaultDailyLossUsd);
