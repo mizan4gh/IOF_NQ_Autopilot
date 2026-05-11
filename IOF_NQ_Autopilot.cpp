@@ -800,7 +800,7 @@ static void WriteCSV(SCStudyInterfaceRef& sc, const char* Evt, const char* Side,
               "%d,%d,%.0f,%.2f,"
               "%.2f,%s,%d,%.2f,%.2f,"
               "%.2f,%.2f,%d,%d,"
-              "%.2f,%d,%d,%d,v12.22,%llu\n",
+              "%.2f,%d,%d,%d,v12.24,%llu\n",
         Y,Mo,D,Hr,Mi,Se,Evt,Side,Mode,Entry,SL,TP1,TP2,Qty,Score,
         CtrlSc,DivStr,Delta,BarSpd,
         ExitPx,ExitR,Hold,MAE,MFE,
@@ -1497,6 +1497,10 @@ enum PersistFloat {
     PF_HypoTP2Px      = 25,
     PF_HypoBEPx       = 26,
     PF_HypoPartialPnL = 27,
+    // [v12.24] Snapshot of pos.CumulativeProfitLoss taken at entry. Used at
+    //          exit to back-compute the actual broker-side average fill price
+    //          when the strategy's reason-resolution falls through to UNKNOWN.
+    PF_CumPnL_AtEntry = 28,
 };
 
 enum PersistPtr {
@@ -1756,6 +1760,7 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
     float& TradeMAE = sc.GetPersistentFloat(PF_TradeMAE);
     float& TradeMFE = sc.GetPersistentFloat(PF_TradeMFE);
     float& ExpectedFillPx = sc.GetPersistentFloat(PF_ExpectedFillPx);
+    float& CumPnL_AtEntry = sc.GetPersistentFloat(PF_CumPnL_AtEntry);
     float& HypoEntryPx    = sc.GetPersistentFloat(PF_HypoEntryPx);
     float& HypoSLPx       = sc.GetPersistentFloat(PF_HypoSLPx);
     float& HypoTP1Px      = sc.GetPersistentFloat(PF_HypoTP1Px);
@@ -1829,7 +1834,7 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
     if(!BannerShown && DIAG) {
         InitRunID();
         SCString m;
-        m.Format("=== V18A v12.23 LOAD sym=%s tick=%.4f tickval=$%.2f Cap=$%.0f DailyLoss=$%.0f DailyProf=$%.0f "
+        m.Format("=== V18A v12.24 LOAD sym=%s tick=%.4f tickval=$%.2f Cap=$%.0f DailyLoss=$%.0f DailyProf=$%.0f "
                  "MaxTr=%d FlatT=%d Qty=%d Live=%d Regime=%d Fade=%d News=%d AutoDis=%d M1=%d V1hooks=%d "
                  "RM_FLOOR=%.2f QUAL_FLOOR=%d CD_trd=%d CD_loss=%d CD_stop=%d RunID=%llu ===",
             sc.Symbol.GetChars(), TICK, TICK_VAL, Capital, DAILY_LOSS, DAILY_PROF,
@@ -1862,8 +1867,28 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
     //  EXIT DETECTION
     // ============================================================================
     if(PrevPosQty!=0&&CurQ==0&&LiveTradeDir!=0){
-        const char* ExR="UNKNOWN"; float ExPx=Close0;
         bool isL=(LiveTradeDir>0);
+        int Hold=Idx-EntryBar;
+
+        // [v12.24] Reconstruct the broker's *actual* average exit fill price
+        //          from realized P/L. This is the ground truth — independent
+        //          of our reason-resolution. Used as the final fallback for
+        //          ExPx whenever we can't tag the exit definitively. Guarded
+        //          against EntryQty<=0 and PtVal<=0 to avoid divide-by-zero.
+        float ExPxFromBroker = 0.f;
+        bool  HasBrokerPx    = false;
+        if(EntryQty > 0 && PtVal > 0.f){
+            float realizedTradePnL = pos.CumulativeProfitLoss - CumPnL_AtEntry;
+            float dollarsPerPt     = PtVal * (float)EntryQty;
+            if(dollarsPerPt > 0.f){
+                float pts = realizedTradePnL / dollarsPerPt;
+                ExPxFromBroker = isL ? (EntryPx + pts) : (EntryPx - pts);
+                HasBrokerPx    = true;
+            }
+        }
+
+        // Default: bar close, used only if nothing better resolves below.
+        const char* ExR="UNKNOWN"; float ExPx=Close0;
 
         if(FlattenReason==FR_FLATTEN){ExR="FLATTEN"; FlattenReason=FR_NONE;}
         else if(FlattenReason==FR_CB){ExR="CB"; FlattenReason=FR_NONE;}
@@ -1884,7 +1909,31 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
             else if(Low0<=T1Px){ExR="TP1"; ExPx=T1Px;}
         }
 
-        int Hold=Idx-EntryBar;
+        // [v12.24] Reason still UNKNOWN means: position went flat, no internal
+        //          flatten path fired, AND the bar's H/L doesn't justify any
+        //          of our SL/TP levels. The only remaining sources are
+        //          Sierra's attached SL bracket, a manual flatten click, or
+        //          a broker-side liquidation. Tag as EXTERNAL so this stops
+        //          masquerading as a clean STOP in journals/stats. Also swap
+        //          the bar-close fallback for the broker-derived fill price
+        //          (line ~1872 above), which is the truth of record.
+        if(strcmp(ExR, "UNKNOWN") == 0){
+            ExR = "EXTERNAL";
+            FlattenReason = FR_NONE;
+            if(HasBrokerPx) ExPx = ExPxFromBroker;
+            if(LOG_LVL >= LOG_SIG){
+                SCString warn; warn.Format(
+                    "[V18A EXIT][EXTERNAL] No internal flatten reason; bar "
+                    "H/L=%.2f/%.2f did not touch SL=%.2f or T1/T2=%.2f/%.2f. "
+                    "Hold=%d. ExPx(bar Close)=%.2f, ExPx(broker)=%.2f. "
+                    "Likely Sierra-attached SL bracket or manual flatten — "
+                    "verify in Sierra Trade Activity Log.",
+                    High0, Low0, StopPx, T1Px, T2Px,
+                    Hold, Close0, HasBrokerPx ? ExPxFromBroker : Close0);
+                sc.AddMessageToLog(warn, 1);
+            }
+        }
+
         float PnL=isL?(ExPx-EntryPx)*PtVal:(EntryPx-ExPx)*PtVal;
         PnL *= (float)EntryQty;
         float todayPnL2=pos.CumulativeProfitLoss-DayOpenPnL;
@@ -3608,6 +3657,10 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
         EntryQty      = baseQty;
         TradeMAE      = 0.f;
         TradeMFE      = 0.f;
+        // [v12.24] Snapshot cumulative realized P/L. At exit, the delta gives
+        //          the true average broker fill price even when our reason
+        //          resolution falls through to UNKNOWN/EXTERNAL.
+        CumPnL_AtEntry = pos.CumulativeProfitLoss;
         Trades++;
         LastSigBar    = Idx;
 
