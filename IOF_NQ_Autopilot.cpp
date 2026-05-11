@@ -1884,6 +1884,30 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
                 float pts = realizedTradePnL / dollarsPerPt;
                 ExPxFromBroker = isL ? (EntryPx + pts) : (EntryPx - pts);
                 HasBrokerPx    = true;
+
+                // [v12.24] Sanity guard against stale CumPnL_AtEntry snapshot.
+                //          Failure mode: the DLL is reloaded mid-trade so slot
+                //          28 was never written under v12.24 → defaults to 0 →
+                //          realizedTradePnL absorbs the entire session's prior
+                //          P/L → ExPxFromBroker lands wildly far from EntryPx.
+                //          Threshold = 5x configured stop distance, with ATR
+                //          fallback if StopPx is unset. Stale snapshots are
+                //          silently rejected; the EXTERNAL path below then
+                //          uses bar Close instead.
+                float scale = FAbs(EntryPx - StopPx);
+                if(scale < TICK) scale = (ATR > 0.f) ? ATR : 10.f;
+                if(FAbs(ExPxFromBroker - EntryPx) > 5.f * scale){
+                    HasBrokerPx = false;
+                    if(LOG_LVL >= LOG_SIG){
+                        SCString w; w.Format(
+                            "[V18A EXIT][SNAPSHOT_STALE] Broker-derived "
+                            "ExPx=%.2f implausibly far from EntryPx=%.2f "
+                            "(scale=%.2f). Likely v12.24 DLL reloaded "
+                            "mid-trade. Falling back to bar Close=%.2f.",
+                            ExPxFromBroker, EntryPx, scale, Close0);
+                        sc.AddMessageToLog(w, 1);
+                    }
+                }
             }
         }
 
