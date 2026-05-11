@@ -71,8 +71,8 @@ SCID_DTYPE = np.dtype([
 #  CONSTANTS  (mirror C++ hardcodes in IOF_NQ_Autopilot.cpp)
 # ─────────────────────────────────────────────────────────────────────────────
 TARGET_VOL   = 3000          # contracts per bar
-RTH_OPEN     = 935           # 09:35 ET
-FLATTEN_HHMM = 1555          # 15:55 ET  (inlined .cpp default)
+RTH_OPEN     = 935           # 09:35 ET — RTH only
+FLATTEN_HHMM = 1555          # 15:55 ET
 
 ATR_PER      = 14
 C_STOP_ATR   = 1.2
@@ -87,7 +87,7 @@ C_T1_FL      = 25.0;  C_T1_CL   = 50.0
 C_T2_FL      = 75.0;  C_T2_CL   = 125.0
 C_RM_FLOOR   = 0.60
 QUAL_FLOOR   = 50
-C_MIN_SC_M1  = 4
+C_MIN_SC_M1  = 3
 C_MIN_SC_ALL = 3
 C_COOL_TRADE = 5
 C_COOL_LOSS  = 10
@@ -100,9 +100,12 @@ C_CONSOL_ATR = 1.5
 C_SWEEP_LB   = 15
 C_MAX_LOSSES = 2
 C_STRUCT_LB  = 25
+C_M5_MIN_SC     = 3    # min score to arm M5
+C_M5_COOLDOWN   = 15   # bars between M5 arms
+C_M5_PHASE3_MAX = 20   # max bars in phase 3 before reset
 
 DAILY_LOSS   = 800.0
-DAILY_PROF   = 0.0           # 0 = disabled (no profit cap)
+DAILY_PROF   = 1000.0        # $1,000 daily profit cap
 MAX_TRADES   = 6
 TICK         = 0.25
 PT_VAL       = 20.0          # NQ: $20/point ($5/tick)
@@ -475,7 +478,7 @@ TB_MAX = 0.35   # trap body max ratio (C++ pAT->trapBodyMax() default)
 
 @dataclass
 class Trap:
-    phase:            int   = 0    # 0=inactive 1=commit 2=absorb
+    phase:            int   = 0    # 0=inactive 1=commit 2=absorb 3=reversal
     direction:        int   = 0    # +1=bull-trap, -1=bear-trap
     valid:            bool  = False
     commit_start_bar: int   = -1
@@ -485,6 +488,7 @@ class Trap:
     commit_low:       float = 0.0
     absorb_bar:       int   = -1
     absorb_px:        float = 0.0
+    phase3_bar:       int   = -1
     stop_target:      float = 0.0
     entry_px:         float = 0.0
 
@@ -492,7 +496,7 @@ class Trap:
         self.phase = 0; self.direction = 0; self.valid = False
         self.commit_start_bar = -1; self.commit_bars = 0; self.commit_delta = 0.0
         self.commit_high = 0.0; self.commit_low = 0.0
-        self.absorb_bar = -1; self.absorb_px = 0.0
+        self.absorb_bar = -1; self.absorb_px = 0.0; self.phase3_bar = -1
         self.stop_target = 0.0; self.entry_px = 0.0
 
 def update_trap(trap: Trap, bars: List[Bar], i: int, atr: float) -> Trap:
@@ -570,9 +574,22 @@ def update_trap(trap: Trap, bars: List[Bar], i: int, atr: float) -> Trap:
                 trap.commit_bars  += 1; trap.commit_delta += bar_d
                 if b.low < trap.commit_low: trap.commit_low = b.low
 
-    # ── Phase 2: absorption — timeout after 3 bars (feeds M4 scoring) ───────
+    # ── Phase 2: absorption — transition to phase 3 when price reverses ──────
     if trap.phase == 2:
-        if i > trap.absorb_bar + 3:
+        if trap.direction == +1 and b.close < trap.absorb_px:
+            trap.phase = 3; trap.phase3_bar = i
+        elif trap.direction == -1 and b.close > trap.absorb_px:
+            trap.phase = 3; trap.phase3_bar = i
+        elif i > trap.absorb_bar + 3:
+            trap.reset()
+
+    # ── Phase 3: trap reversal active — reclaim reset + timeout ──────────────
+    if trap.phase == 3:
+        if trap.direction == +1 and b.close > trap.absorb_px:  # reclaim up = trap invalid
+            trap.reset()
+        elif trap.direction == -1 and b.close < trap.absorb_px:  # reclaim down = trap invalid
+            trap.reset()
+        elif trap.phase3_bar >= 0 and i > trap.phase3_bar + C_M5_PHASE3_MAX:
             trap.reset()
 
     return trap
@@ -671,12 +688,21 @@ def imbalance_state(bars: List[Bar], i: int) -> Imb:
     return imb
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  NEWS FILTER  (mirrors C++ v12.8 windows)
+# ─────────────────────────────────────────────────────────────────────────────
+def is_news_window(hhmm: int) -> bool:
+    if 825  <= hhmm <= 835:  return True   # 08:30 econ data
+    if 955  <= hhmm <= 1005: return True   # 10:00 secondary releases
+    if 1355 <= hhmm <= 1405: return True   # 14:00 FOMC / speakers
+    return False
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  QUALITY SCORE
 # ─────────────────────────────────────────────────────────────────────────────
 def qual100(sel_mode: int, final_sc: int, edge_sc: int, fade_active: bool) -> int:
     if sel_mode == 7 and fade_active:
         return min(100, max(0, edge_sc * 10))
-    if 3 <= sel_mode <= 6:
+    if sel_mode == 0 or 3 <= sel_mode <= 6:   # M1 + reversal modes use *10 (scores bounded 0-5 in Python)
         return min(100, max(0, final_sc * 10))
     return min(100, max(0, (final_sc * 100) // 15))
 
@@ -807,6 +833,7 @@ class Backtester:
         self.last_loss_bar  = -1
         self.last_stop_bar  = -1
         self.last_stop_dir  = 0
+        self.last_m5_bar    = -1
         self.prev_imb_dir   = 0
         self.prev_imb_str   = 0
         self.prev_imb_ext   = 0.0
@@ -856,6 +883,7 @@ class Backtester:
             self.day_done   = False
             self.risk.day_reset()
             self.trap.reset()
+            self.last_m5_bar = -1
 
         # ── RTH + flatten ────────────────────────────────────────────────────
         if bar.hhmm >= FLATTEN_HHMM:
@@ -883,6 +911,7 @@ class Backtester:
             return
 
         # ── Entry gates ──────────────────────────────────────────────────────
+        if is_news_window(bar.hhmm):               return
         if self.day_trades >= MAX_TRADES:          return
         if self.risk.sess_dd > DAILY_LOSS * 0.8:  return
         if self.risk.consec_loss >= C_MAX_LOSSES:  return
@@ -911,13 +940,26 @@ class Backtester:
         vb2l = vwap - vsd * 2 if vsd > 0 else 0.0
 
         # ── Modes ────────────────────────────────────────────────────────────
+        m1l = m1s = False
         m2l = m2s = m3l = m3s = m4l = m4s = False
+        m5l = m5s = False
         m6l = m6s = m7l = m7s = m8l = m8s = False
         m6_sp = m6_t1 = m6_t2 = 0.0
         m7_sp = 0.0
         fade_active = False; fade_edge = fade_type = 0
         fd_sp = fd_t1 = fd_t2 = 0.0
         bk_vs = 99  # balance verify score placeholder for M8
+
+        # M1 — VWAP bounce / reject
+        if vwap_ok and atr > 0:
+            vw_z = atr * 0.75
+            touch = bar.low <= vwap + vw_z and bar.high >= vwap - vw_z
+            prev_c = self.bars[i-1].close if i > 0 else bar.close
+            if touch:
+                if bull and bar.close > vwap and prev_c > vwap and sc_l >= C_MIN_SC_M1 and ctrl >= 0:
+                    m1l = True
+                if bear and bar.close < vwap and prev_c < vwap and sc_s >= C_MIN_SC_M1 and ctrl <= 0 and not m1l:
+                    m1s = True
 
         # M2 — VP level test
         if vwap_ok and self.vp.valid and atr > 0:
@@ -956,6 +998,19 @@ class Backtester:
                 m4l = True
             if m4_vwap_edge and bar.high > sw_hi + TICK and bar.close < sw_hi and bear and sc_s >= m4_min and ctrl <= 0:
                 m4s = True
+
+        # M5 — Trap reversal (RTH only: 09:35–15:45)
+        if self.trap.phase == 3 and atr > 0 and bar.hhmm >= 935:
+            m5_cool = self.last_m5_bar < 0 or i > self.last_m5_bar + C_M5_COOLDOWN
+            if m5_cool:
+                if self.trap.direction == +1 and ctrl <= 0:   # bull trap -> fade = short
+                    if dlt < 0 and sc_s >= C_M5_MIN_SC:
+                        m5s = True
+                if self.trap.direction == -1 and ctrl >= 0:   # bear trap -> fade = long
+                    if dlt > 0 and sc_l >= C_M5_MIN_SC:
+                        m5l = True
+                if m5l or m5s:
+                    self.last_m5_bar = i
 
         # M6 — Balance breakout
         bk_vs = 10  # mirrors C++ bkVerifyScore=10; stays 10 if no breakout so M8 gate (<=4) stays closed
@@ -1072,12 +1127,20 @@ class Backtester:
                     fd_sp = bar.low - atr * 0.3
                     fd_t1 = bal.poc; fd_t2 = bal.hi
 
-        # ── Priority selection (M4, M6 only) ─────────────────────────────────
+        # ── Priority: M6 > M7 > M5 > M8 > M4 > M3 > M2 > M1 ───────────────
         sel = -1; sl = False
         if   m6l: sel = 5; sl = True
         elif m6s: sel = 5
+        elif m8l: sel = 7; sl = True
+        elif m8s: sel = 7
         elif m4l: sel = 3; sl = True
         elif m4s: sel = 3
+        elif m3l: sel = 2; sl = True
+        elif m3s: sel = 2
+        elif m2l: sel = 1; sl = True
+        elif m2s: sel = 1
+        elif m1l: sel = 0; sl = True
+        elif m1s: sel = 0
         if sel < 0: return
 
         # ── Regime filter ────────────────────────────────────────────────────
@@ -1085,6 +1148,13 @@ class Backtester:
         ts     = self._trend_str(i, atr)
         vr     = self._vol_reg(i, atr)
         if not self._regime_ok(sel, sl, tr, cr, ts): return
+        if sel == 0 and vr == 0: return   # M1: no trades in flat/low-ATR market
+        if sel == 0 and 1200 <= bar.hhmm <= 1359: return  # M1: dead zone (0% WR 12-14h)
+        if sel == 0:  # M1 directional trend gate: don't buy into downtrend / sell into uptrend
+            lb20 = min(20, i)
+            pc20 = bar.close - self.bars[i - lb20].close if lb20 > 0 else 0.0
+            if sl  and pc20 < -atr * 0.5: return   # LONG into falling market
+            if not sl and pc20 >  atr * 0.5: return  # SHORT into rising market
 
         # ── RM floor ─────────────────────────────────────────────────────────
         if self.risk.rm < C_RM_FLOOR: return
@@ -1309,9 +1379,10 @@ class Backtester:
         if i < 20 or atr <= 0: return 0, 0
         lb = min(20, i)
         pc = self.bars[i].close - self.bars[i - lb].close
-        dp = sum(abs(self.bars[j].ask_vol - self.bars[j].bid_vol)
+        dp = sum(abs(self.bars[j].ask_vol - self.bars[j].bid_vol) /
+                 max(1, self.bars[j].ask_vol + self.bars[j].bid_vol)
                  for j in range(i - lb + 1, i + 1)) / lb
-        ts = dp / (atr * 0.1) if atr > 0 else 0
+        ts = dp / 0.1
         tr = (1 if ts > 1.5 and pc > atr * 0.5 else
               -1 if ts > 1.5 and pc < -atr * 0.5 else 0)
         crosses = sum(1 for k in range(1, min(12, i))
@@ -1324,9 +1395,10 @@ class Backtester:
     def _trend_str(self, i: int, atr: float) -> float:
         if i < 5 or atr <= 0: return 0.0
         lb = min(20, i)
-        dp = sum(abs(self.bars[j].ask_vol - self.bars[j].bid_vol)
+        dp = sum(abs(self.bars[j].ask_vol - self.bars[j].bid_vol) /
+                 max(1, self.bars[j].ask_vol + self.bars[j].bid_vol)
                  for j in range(i - lb + 1, i + 1)) / lb
-        return dp / (atr * 0.1)
+        return dp / 0.1  # ts=1.0 at 10% avg delta imbalance
 
     def _vol_reg(self, i: int, atr: float) -> int:
         if i < 30 or atr <= 0: return 1

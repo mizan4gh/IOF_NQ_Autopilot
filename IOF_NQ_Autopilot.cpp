@@ -2,7 +2,7 @@
 //  IOF NQ — Pure Orderflow Autopilot
 //  Sierra Chart ACSIL Study
 //
-//  Version: v12.21 (May 2026; M5 mode removed — backtest showed persistent regime-dependent losses)
+//  Version: v12.24 (May 2026; M7 removed; M1 dead-zone + trend gate)
 //
 //  CHANGES SINCE v11:
 //    [v12.1] RM floor 0.80 -> 0.60, Kelly cold-start 0.8 -> 0.9.
@@ -102,6 +102,34 @@
 //             remain. TrapState struct retained (phases 0-2 feed M4 scoring via
 //             S11/trapConf); phase-3 progression and all M5 signal logic removed.
 //
+//    [v12.22] M5 (Trap Reversal) mode restored. All modes active: M1–M8.
+//             Phase-3 trap progression and M5 signal block reinstated from v12.20
+//             state (reclaim-reset, phase-3 timeout, DL/DS-only entry, ctrl>=0 gate).
+//
+//    [v12.24] Backtest-derived filter sync:
+//             (a) M7 (Auction Reversal) removed from signal combination and
+//                 priority selector. NQZ5 2025 backtest: 2 trades, -$4,981.
+//             (b) M1 dead-zone block: no M1 entries 12:00-13:59 ET.
+//                 NQH26 analysis: 0% WR in that window across all tested contracts.
+//             (c) M1 trend direction gate: block M1 LONG when 20-bar price
+//                 change < -0.5*ATR; block M1 SHORT when > +0.5*ATR.
+//                 Eliminates VWAP bounce entries against prevailing trend.
+//                 NQH26 Jan 21-23 cluster (-$2,015) would have been fully avoided.
+//
+//    [v12.23] Live-readiness pass per backtest findings:
+//             (a) M5 removed from signal combination and priority selector.
+//                 NQZ5 backtest: 18-20 trades at 10-12% WR, primary drag.
+//                 TrapState phases 0-2 retained for M4 scoring (S11/trapConf).
+//             (b) M1 enabled by default (IN_M1_ENABLE default 0→1).
+//                 Backtest: 68-190 trades, 25-30% WR, $5.5K net on NQZ5/NQH26.
+//             (c) Daily loss cap default $1,000→$800.
+//             (d) Daily profit cap default $1,000→$0 (disabled).
+//             (e) News filter default ON→OFF.
+//             (f) SESSION_START input (slot 25, default 100=01:00 ET).
+//                 Replaces hard BeforeRthOpen(935) entry gate.
+//                 Set to 0 to revert to RTH-only (09:35+).
+//                 VWAP/stats tracking still anchored to RTH_OPEN=935.
+//
 //    [v12.19] Default daily caps: $1000 loss / $1000 profit (iof_unified defaults).
 //             ATR: clarified volume-bar semantics; floor when SG_ATR<=0 (warmup/edge).
 //
@@ -170,8 +198,8 @@ inline float FMin(float a, float b) { return a < b ? a : b; }
 // ----- Inlined from iof_unified/iof_defaults.h -----
 namespace iof_unified {
 constexpr int kTargetVolumeBars = 3000;
-constexpr float kDefaultDailyLossUsd = 1000.f;
-constexpr float kDefaultDailyProfitUsd = 1000.f;
+constexpr float kDefaultDailyLossUsd = 800.f;
+constexpr float kDefaultDailyProfitUsd = 0.f;   // disabled — no profit cap
 constexpr int kDefaultRthOpenHhmm = 935;
 constexpr int kDefaultFlattenHhmm = 1555;
 }
@@ -569,6 +597,9 @@ static const int   C_MAX_LOSSES     = 2;
 static const int   C_VWAP_SLP_LB    = 20;
 static const int   C_CONSOL_LB      = 25;
 static const float C_CONSOL_ATR     = 1.5f;
+static const int   C_M5_MIN_SC      = 3;    // min score to arm M5 (= C_MIN_SCORE_ALL)
+static const int   C_M5_COOLDOWN    = 15;   // bars between M5 arms [v12.14]
+static const int   C_M5_PHASE3_MAX  = 20;   // max bars in phase 3 before reset [v12.20]
 static const int   C_SWEEP_LB       = 15;
 static const int   C_SPIKE_COOL     = 20;
 static const float C_SPIKE_ATR_M    = 3.0f;
@@ -769,7 +800,7 @@ static void WriteCSV(SCStudyInterfaceRef& sc, const char* Evt, const char* Side,
               "%d,%d,%.0f,%.2f,"
               "%.2f,%s,%d,%.2f,%.2f,"
               "%.2f,%.2f,%d,%d,"
-              "%.2f,%d,%d,%d,v12.21,%llu\n",
+              "%.2f,%d,%d,%d,v12.22,%llu\n",
         Y,Mo,D,Hr,Mi,Se,Evt,Side,Mode,Entry,SL,TP1,TP2,Qty,Score,
         CtrlSc,DivStr,Delta,BarSpd,
         ExitPx,ExitR,Hold,MAE,MFE,
@@ -965,8 +996,8 @@ struct VPState {
 struct IcebergState{bool bidIceberg,askIceberg;float bidIcebergPx,askIcebergPx,bidIcebergVol,askIcebergVol;int bidIcebergBars,askIcebergBars;
     void reset(){bidIceberg=askIceberg=false;bidIcebergPx=askIcebergPx=0.f;bidIcebergVol=askIcebergVol=0.f;bidIcebergBars=askIcebergBars=0;}};
 
-struct TrapState{int phase,direction,commitStartBar,commitBars;float commitDelta,commitHigh,commitLow,absorbPx;int absorbBar;float stopTarget,entryPx;bool valid;
-    void reset(){phase=0;direction=0;commitStartBar=-1;commitBars=0;commitDelta=0.f;commitHigh=0.f;commitLow=0.f;absorbPx=0.f;absorbBar=-1;stopTarget=0.f;entryPx=0.f;valid=false;}};
+struct TrapState{int phase,direction,commitStartBar,commitBars;float commitDelta,commitHigh,commitLow,absorbPx;int absorbBar,phase3Bar;float stopTarget,entryPx;bool valid;
+    void reset(){phase=0;direction=0;commitStartBar=-1;commitBars=0;commitDelta=0.f;commitHigh=0.f;commitLow=0.f;absorbPx=0.f;absorbBar=-1;phase3Bar=-1;stopTarget=0.f;entryPx=0.f;valid=false;}};
 
 struct BalanceState{bool active,mature;float rangeHigh,rangeLow,rangePOC,volumeTotal,vpConcentration,cumDelta;int barCount,deltaFlips;
     void reset(){active=false;mature=false;rangeHigh=rangeLow=rangePOC=0.f;volumeTotal=0.f;barCount=0;deltaFlips=0;cumDelta=0.f;vpConcentration=0.f;}};
@@ -1527,15 +1558,15 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
     SCInputRef IN_V1_VOL_LB=sc.Input[22];
     SCInputRef IN_V1_PACE_LB=sc.Input[23];
     SCInputRef IN_V1_SHARPE_WARN=sc.Input[24];
+    SCInputRef IN_SESSION_START=sc.Input[25];  // [v12.23] 0=RTH only, 100=01:00 ET
 
     if(sc.SetDefaults){
         sc.GraphName="IOF NQ Autopilot";
         sc.StudyDescription="IOF NQ Pure Orderflow (May 2026). "
-            "v12.21: M5 (Trap Reversal) removed — regime-dependent losses. Active modes: M4 M6 M7 M8. "
-            "RM floor 0.60, Quality floor 50, M1 toggleable. "
-            "1 contract only (Sierra max position + input clamp). "
-            "Defaults: daily loss cap $1000, profit lock $1000 (inputs). "
-            "3k (3000) vol bars RTH. CSV IOF_NQ_*.csv. See iof_unified::kTargetVolumeBars.";
+            "v12.24: Active modes M1-M4,M6,M8 (M5+M7 removed). "
+            "M1 ON with dead-zone(12-14h) + trend gate. News OFF, $800 daily loss cap, no profit cap. "
+            "Night+RTH session from 01:00 ET (SESSION_START input). "
+            "1 contract only. 3k (3000) vol bars. CSV IOF_NQ_*.csv.";
         sc.AutoLoop=1; sc.GraphRegion=0;
         sc.SendOrdersToTradeService=0; sc.AllowOnlyOneTradePerBar=0;
         sc.MaximumPositionAllowed=1; sc.SupportReversals=0;
@@ -1580,10 +1611,10 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
         IN_DIAG.Name="Diagnostics (0=off,1=on)"; IN_DIAG.SetInt(1);
         IN_REGIME_FILTER.Name="Regime Mode Filter (0=off)"; IN_REGIME_FILTER.SetInt(1);
         IN_FADE_ENABLE.Name="Fade Engine (0=off)"; IN_FADE_ENABLE.SetInt(1);
-        IN_NEWS_FILTER.Name="News Filter (0=off)"; IN_NEWS_FILTER.SetInt(1);
+        IN_NEWS_FILTER.Name="News Filter (0=off)"; IN_NEWS_FILTER.SetInt(0);   // [v12.23] default OFF
         IN_AUTO_DISABLE.Name="Auto-disable bad modes (0=off)"; IN_AUTO_DISABLE.SetInt(1);
-        IN_DAILY_PROF.Name="Daily Profit Target $ (0=disabled)"; IN_DAILY_PROF.SetFloat(iof_unified::kDefaultDailyProfitUsd);
-        IN_M1_ENABLE.Name="Enable M1 VWAP Reclaim (0=off per manual)"; IN_M1_ENABLE.SetInt(0);  // [v12.5]
+        IN_DAILY_PROF.Name="Daily Profit Target $ (0=disabled)"; IN_DAILY_PROF.SetFloat(0.f);  // [v12.23] disabled
+        IN_M1_ENABLE.Name="Enable M1 VWAP Reclaim"; IN_M1_ENABLE.SetInt(1);   // [v12.23] default ON
         IN_V1_HOOKS.Name="V1 hooks (0=off 1=conf 2=chop 3=both 4=both+Sharpe warn)";
         IN_V1_HOOKS.SetInt(0); IN_V1_HOOKS.SetIntLimits(0, 4);
         IN_V1_MIN_CONF.Name="V1 min confirmations total (agg>=1 struct>=1 required)"; IN_V1_MIN_CONF.SetInt(3);
@@ -1595,6 +1626,7 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
         IN_V1_VOL_LB.Name="V1 volume avg lookback"; IN_V1_VOL_LB.SetInt(20); IN_V1_VOL_LB.SetIntLimits(1, 200);
         IN_V1_PACE_LB.Name="V1 pace lookback"; IN_V1_PACE_LB.SetInt(3); IN_V1_PACE_LB.SetIntLimits(1, 50);
         IN_V1_SHARPE_WARN.Name="V1 rolling R-Sharpe warn (mode 4)"; IN_V1_SHARPE_WARN.SetFloat(0.30f);
+        IN_SESSION_START.Name="Session Start HHMM (0=RTH 09:35, 100=01:00 ET)"; IN_SESSION_START.SetInt(100);  // [v12.23]
         return;
     }
 
@@ -1657,7 +1689,8 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
     const float Vol0=sc.Volume[Idx];
     const bool barBullish=(Close0>Open0),barBearish=(Close0<Open0);
     const float barBody=FAbs(Close0-Open0),barRange=High0-Low0;
-    const int RTH_OPEN = iof_unified::kDefaultRthOpenHhmm;
+    const int RTH_OPEN = iof_unified::kDefaultRthOpenHhmm;   // 935 — anchors VWAP/stats
+    const int SESS_START = (IN_SESSION_START.GetInt() > 0) ? IN_SESSION_START.GetInt() : RTH_OPEN;  // [v12.23] entry gate
     SCDateTime barDT=sc.BaseDateTimeIn[Idx];
     int BarDate=barDT.GetDate(),BarTime=barDT.GetTime();
     const int BarHHMM=iof_session::BarHhmmFromSecondsSinceMidnight(BarTime);
@@ -1678,6 +1711,8 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
     int& LastSigBar     = sc.GetPersistentInt(PI_LastSigBar);
     int& VWAPBars       = sc.GetPersistentInt(PI_VWAPBars);
     int& T1HitBar       = sc.GetPersistentInt(PI_T1HitBar);
+    int& LastM5Bar       = sc.GetPersistentInt(PI_LastM5Bar);
+    int& LastM5LogBar    = sc.GetPersistentInt(PI_LastM5LogBar);
     int& LastSkipLogBar  = sc.GetPersistentInt(PI_LastSkipLogBar);
     int& LastBlockLogBar = sc.GetPersistentInt(PI_LastBlockLogBar);
     int& LastVPBar       = sc.GetPersistentInt(PI_LastVPBar);
@@ -1794,7 +1829,7 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
     if(!BannerShown && DIAG) {
         InitRunID();
         SCString m;
-        m.Format("=== V18A v12.21 LOAD sym=%s tick=%.4f tickval=$%.2f Cap=$%.0f DailyLoss=$%.0f DailyProf=$%.0f "
+        m.Format("=== V18A v12.23 LOAD sym=%s tick=%.4f tickval=$%.2f Cap=$%.0f DailyLoss=$%.0f DailyProf=$%.0f "
                  "MaxTr=%d FlatT=%d Qty=%d Live=%d Regime=%d Fade=%d News=%d AutoDis=%d M1=%d V1hooks=%d "
                  "RM_FLOOR=%.2f QUAL_FLOOR=%d CD_trd=%d CD_loss=%d CD_stop=%d RunID=%llu ===",
             sc.Symbol.GetChars(), TICK, TICK_VAL, Capital, DAILY_LOSS, DAILY_PROF,
@@ -2028,6 +2063,7 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
         }
         LiveTradeDir=0;
         ConsecLoss=0; LastExitWasLoss=0; LastSigBar=-1;
+        LastM5Bar=-1; LastM5LogBar=-1;
         LastSkipLogBar=-1; LastBlockLogBar=-1;
         LastVPBar=-1; LastCalcBar=-1;
         LastStopBar=-1; LastStopDir=0;
@@ -2111,7 +2147,7 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
     if(Delta0<0.f) SG_DELTA.DataColor[Idx]=SG_DELTA.SecondaryColor;
     else SG_DELTA.DataColor[Idx]=SG_DELTA.PrimaryColor;
 
-    if(iof_session::BeforeRthOpen(BarHHMM,RTH_OPEN)) return;
+    if(BarHHMM < SESS_START) return;   // [v12.23] session gate (SESS_START=100 → 01:00 ET)
     if(ATR<=0.f) return;
 
     // [v12.11] Signal-only gate — fixes the 29-SETUPs-zero-ENTRYs issue.
@@ -2405,7 +2441,7 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
 
     if(iof_session::AtOrAfterFlatten(BarHHMM,FLAT_TIME)) return;
     if(C_OPEN_COOL>0){
-        int oM=(RTH_OPEN/100)*60+(RTH_OPEN%100);
+        int oM=(SESS_START/100)*60+(SESS_START%100);   // [v12.23] cooldown from session start
         int bM=(BarHHMM/100)*60+(BarHHMM%100);
         if(bM<oM+C_OPEN_COOL) return;
     }
@@ -2711,7 +2747,22 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
             }
         }
         if(pTrap->phase==2){
-            if(Idx>pTrap->absorbBar+3){pTrap->reset();}
+            // Transition to phase 3 when price reverses through absorbPx
+            if(pTrap->direction==+1 && Close0<pTrap->absorbPx){
+                pTrap->phase=3; pTrap->phase3Bar=Idx;
+            } else if(pTrap->direction==-1 && Close0>pTrap->absorbPx){
+                pTrap->phase=3; pTrap->phase3Bar=Idx;
+            } else if(Idx>pTrap->absorbBar+3){
+                pTrap->reset();
+            }
+        }
+        if(pTrap->phase==3){
+            // [v12.20a] Reclaim reset: price returned to absorption side → trap invalid
+            bool reclaimL=(pTrap->direction==+1 && Close0>pTrap->absorbPx);
+            bool reclaimS=(pTrap->direction==-1 && Close0<pTrap->absorbPx);
+            if(reclaimL||reclaimS){ pTrap->reset(); }
+            // [v12.20b] Phase-3 timeout
+            else if(pTrap->phase3Bar>=0 && Idx>pTrap->phase3Bar+C_M5_PHASE3_MAX){ pTrap->reset(); }
         }
     }
 
@@ -2886,6 +2937,27 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
             int es=DS?scS:lbScS;
             bool iceBlock=(pIce&&pIce->bidIceberg&&FAbs(pIce->bidIcebergPx-swHi)<=ATR*0.5f);
             if(es>=M4_MIN_SCORE&&!iceBlock) m4S=true;
+        }
+    }
+
+    // ============================================================================
+    //  M5 — TRAP REVERSAL  [v12.14/v12.20/v12.22 restored]
+    // ============================================================================
+    bool m5L=false, m5S=false;
+    if(pTrap&&pTrap->phase==3&&ATR>0.f&&BarHHMM>=RTH_OPEN){
+        bool m5Cool=(LastM5Bar<0||Idx>LastM5Bar+C_M5_COOLDOWN);
+        if(m5Cool){
+            // Bullish trap (committed up move absorbed) → fade = short
+            if(pTrap->direction==+1&&controlScore<=0){
+                int es=DS?scS:0;  // [v12.20c] no LBS fallback
+                if(es>=C_M5_MIN_SC) m5S=true;
+            }
+            // Bearish trap (committed down move absorbed) → fade = long
+            if(pTrap->direction==-1&&controlScore>=0){
+                int es=DL?scL:0;  // [v12.20c] no LBL fallback
+                if(es>=C_M5_MIN_SC) m5L=true;
+            }
+            if(m5L||m5S) LastM5Bar=Idx;  // [v12.14] arm immediately regardless of entry outcome
         }
     }
 
@@ -3145,13 +3217,14 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
             (pFade && pFade->active));
         SCString em;
         em.Format("[V18A EVAL] %02d:%02d scL=%d scS=%d ctrl=%d div=%d "
-                  "m1=%d%d m2=%d%d m3=%d%d m4=%d%d m6=%d%d m7=%d%d m8=%d%d "
+                  "m1=%d%d m2=%d%d m3=%d%d m4=%d%d m5=%d%d m6=%d%d m7=%d%d m8=%d%d "
                   "RM=%.2f Q~%d trend=%d chop=%d CL=%d",
             BarHHMM/100, BarHHMM%100,
             DL?scL:(LBL?lbScL:0), DS?scS:(LBS?lbScS:0),
             controlScore, pDiv?pDiv->strength:0,
             m1L?1:0, m1S?1:0, m2L?1:0, m2S?1:0,
             m3L?1:0, m3S?1:0, m4L?1:0, m4S?1:0,
+            m5L?1:0, m5S?1:0,
             m6L?1:0, m6S?1:0,
             m7L?1:0, m7S?1:0, m8L?1:0, m8S?1:0,
             pRisk?pRisk->riskMultiplier:1.0f, q_preview,
@@ -3164,17 +3237,15 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
     // ============================================================================
     //  SIGNAL COMBINATION
     // ============================================================================
-    bool goL=m1L||m2L||m3L||m4L||m6L||m7L||m8L;
-    bool goS=m1S||m2S||m3S||m4S||m6S||m7S||m8S;
+    bool goL=m1L||m2L||m3L||m4L||m6L||m8L;   // [v12.24] M5+M7 removed
+    bool goS=m1S||m2S||m3S||m4S||m6S||m8S;
     if(!goL&&!goS) return;
 
     int selMode=-1;
     bool selLong=false;
-    // priority: M6 > M7 > M8 (fade) > M4 > M3 > M2 > M1
+    // priority: M6 > M8 (fade) > M4 > M3 > M2 > M1  [v12.24: M5+M7 removed]
     if(m6L){selMode=5; selLong=true;}
     else if(m6S){selMode=5; selLong=false;}
-    else if(m7L){selMode=6; selLong=true;}
-    else if(m7S){selMode=6; selLong=false;}
     else if(m8L){selMode=7; selLong=true;}
     else if(m8S){selMode=7; selLong=false;}
     else if(m4L){selMode=3; selLong=true;}
@@ -3197,6 +3268,18 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
             sc.AddMessageToLog(m,0);
         }
         return;
+    }
+
+    // [v12.24] M1-specific filters derived from backtest cluster analysis
+    if(selMode==0){
+        // Dead zone: 12:00-13:59 ET — 0% WR confirmed on NQH26/NQM25/NQZ5
+        if(BarHHMM>=1200 && BarHHMM<=1359) return;
+        // Trend direction gate: no LONG into falling 20-bar trend, no SHORT into rising
+        if(ATR>0.f && Idx>=20){
+            float pc20 = sc.Close[Idx] - sc.Close[Idx-20];
+            if(selLong  && pc20 < -ATR*0.5f) return;
+            if(!selLong && pc20 >  ATR*0.5f) return;
+        }
     }
 
     if(V1_HOOKS>0){

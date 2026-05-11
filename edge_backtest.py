@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
-IOF NQ EdgeDiscovery Backtest  v1.0
+IOF NQ EdgeDiscovery Backtest  v2.0
 
 Faithfully replicates IOF_NQ_EdgeDiscovery.cpp signal logic, then fires
-simulated trades and reports performance — same stop/target/risk structure
-as the main backtest.py.
+simulated trades with an adaptive regime detector that switches between
+MOMENTUM (follow the signal) and FADE (counter the signal) per bar.
 
-Signal (momentum):
-  Long  when dist_vwap_atr >= +SIG_DIST AND cum_delta_z >= +SIG_Z
-  Short when dist_vwap_atr <= -SIG_DIST AND cum_delta_z <= -SIG_Z
-
-Optionally also tests FADE (mean-reversion) direction.
+Regime detector (two independent factors, OR logic):
+  Factor 1 — ATR expansion: if today's session ATR > REGIME_ATR_THRESH x
+             rolling 20-session ATR EMA -> high-volatility/spike-revert regime -> FADE
+  Factor 2 — VWAP oscillation: if dist_vwap_atr changed sign >= REGIME_CROSS_THRESH
+             times in the last REGIME_CROSS_LB bars -> choppy/reverting -> FADE
+  Default when neither fires -> MOMENTUM
 
 Usage:
   python edge_backtest.py                                 # NQH26 default
@@ -58,6 +59,12 @@ C_TRAIL_ATR  = 1.50
 C_TRAIL_DLY  = 5              # bars before trail activates
 C_T1_RATIO   = 0.50           # fraction closed at T1
 C_COOL_TRADE = 5              # bars cooldown after any trade
+
+# Regime detector
+REGIME_ATR_LB      = 20    # sessions for rolling ATR EMA
+REGIME_ATR_THRESH  = 1.4   # session ATR > thresh x long-run ATR -> FADE
+REGIME_CROSS_LB    = 15    # bars to count VWAP sign changes
+REGIME_CROSS_THRESH= 4     # sign changes >= this -> FADE
 
 # Risk / daily limits
 DAILY_LOSS   = 800.0
@@ -175,6 +182,65 @@ class WilderATR:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  REGIME DETECTOR
+# ─────────────────────────────────────────────────────────────────────────────
+class RegimeDetector:
+    """
+    Per-bar regime label: "MOMENTUM" or "FADE".
+
+    Factor 1 (ATR expansion):
+      Track session-average ATR across last REGIME_ATR_LB sessions.
+      If today's bar ATR > REGIME_ATR_THRESH * rolling_atr_ema -> FADE.
+
+    Factor 2 (VWAP oscillation):
+      Count sign changes in dist_vwap_atr over last REGIME_CROSS_LB bars.
+      If >= REGIME_CROSS_THRESH -> FADE.
+
+    Either factor alone triggers FADE (OR logic).
+    """
+    def __init__(self):
+        self._sess_atr_sum  = 0.0   # sum of bar ATRs in current session
+        self._sess_atr_cnt  = 0
+        self._atr_ema       = 0.0   # EMA of daily average ATR
+        self._atr_alpha     = 2.0 / (REGIME_ATR_LB + 1)
+        self._prev_date     = -1
+        self.regime_v: List[str] = []  # parallel to bars
+
+    def update(self, i: int, b: "Bar", atr: float, dist_vwap_arr: List[float]) -> str:
+        # Day rollover: finalise previous session ATR into EMA
+        if b.date_tag != self._prev_date:
+            if self._sess_atr_cnt > 0:
+                sess_avg = self._sess_atr_sum / self._sess_atr_cnt
+                if self._atr_ema == 0.0:
+                    self._atr_ema = sess_avg
+                else:
+                    self._atr_ema += self._atr_alpha * (sess_avg - self._atr_ema)
+            self._sess_atr_sum = 0.0
+            self._sess_atr_cnt = 0
+            self._prev_date = b.date_tag
+
+        if b.hhmm >= RTH_OPEN:
+            self._sess_atr_sum += atr
+            self._sess_atr_cnt += 1
+
+        # Factor 1: ATR expansion
+        fade_vol = (self._atr_ema > 0 and
+                    atr > REGIME_ATR_THRESH * self._atr_ema)
+
+        # Factor 2: VWAP oscillation (sign changes in last REGIME_CROSS_LB bars)
+        crossings = 0
+        lo = max(0, i - REGIME_CROSS_LB)
+        for j in range(lo + 1, i + 1):
+            if dist_vwap_arr[j] * dist_vwap_arr[j - 1] < 0:
+                crossings += 1
+        fade_osc = (crossings >= REGIME_CROSS_THRESH)
+
+        regime = "FADE" if (fade_vol or fade_osc) else "MOMENTUM"
+        self.regime_v.append(regime)
+        return regime
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  INDICATOR PRE-COMPUTE
 # ─────────────────────────────────────────────────────────────────────────────
 def precompute(bars: List[Bar]):
@@ -185,8 +251,10 @@ def precompute(bars: List[Bar]):
     cum_delta_z = [0.0]*n
     dist_vwap   = [0.0]*n
     edge_sig    = [0]*n
+    regime_v    = ["MOMENTUM"]*n
 
     atr_calc = WilderATR(ATR_PERIOD)
+    regime   = RegimeDetector()
     sess_cum_pv = sess_cum_v = 0.0
     sess_cum_d  = 0.0
     cum_d_hist: List[float] = []
@@ -211,6 +279,9 @@ def precompute(bars: List[Bar]):
         dv = (b.close - vwap) / atr if atr > 1e-6 else 0.0
         dist_vwap[i] = dv
 
+        # Regime label for this bar (uses dist_vwap up to index i)
+        regime_v[i] = regime.update(i, b, atr, dist_vwap)
+
         # Z-score of session cum delta
         if b.hhmm >= RTH_OPEN:
             cum_d_hist.append(sess_cum_d)
@@ -229,7 +300,7 @@ def precompute(bars: List[Bar]):
                 dv * cum_delta_z[i] > 0):
             edge_sig[i] = 1 if dv > 0 else -1
 
-    return atr_v, vwap_v, cum_d_v, cum_delta_z, dist_vwap, edge_sig
+    return atr_v, vwap_v, cum_d_v, cum_delta_z, dist_vwap, edge_sig, regime_v
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -252,13 +323,14 @@ class Trade:
     t1_hit:     bool  = False
     pnl:        float = 0.0
     mode:       str   = "ED"   # EdgeDiscovery
+    regime:     str   = "MOMENTUM"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  STRATEGY LOOP
 # ─────────────────────────────────────────────────────────────────────────────
 def run_strategy(bars: List[Bar], atr_v, vwap_v, cum_d_v, cum_dz, dist_vwap,
-                 edge_sig, fade: bool = False) -> List[Trade]:
+                 edge_sig, regime_v: List[str]) -> List[Trade]:
     trades: List[Trade] = []
     in_pos       = False
     pos_dir      = 0
@@ -273,12 +345,12 @@ def run_strategy(bars: List[Bar], atr_v, vwap_v, cum_d_v, cum_dz, dist_vwap,
     consec_loss  = 0
     prev_date    = -1
 
+    entry_regime = "MOMENTUM"
+
     def close_trade(i, px, reason):
         nonlocal in_pos, pos_dir, t1_hit, trail_active
         nonlocal day_pnl, consec_loss, day_done
         b = bars[i]
-        # Qty: if T1 was hit we already closed half, runner = 1 contract
-        # For simplicity: 1 contract total (like backtest.py baseQty=1)
         pnl_pts = (px - entry_px) * pos_dir
         pnl_dollar = pnl_pts * PT_VAL - COMMISSION
         day_pnl += pnl_dollar
@@ -296,6 +368,7 @@ def run_strategy(bars: List[Bar], atr_v, vwap_v, cum_d_v, cum_dz, dist_vwap,
             exit_reason=reason,
             t1_hit=t1_hit,
             pnl=round(pnl_dollar, 2),
+            regime=entry_regime,
         )
         trades.append(t)
         if pnl_dollar < 0:
@@ -371,8 +444,9 @@ def run_strategy(bars: List[Bar], atr_v, vwap_v, cum_d_v, cum_dz, dist_vwap,
         if last_trade_bar >= 0 and i < last_trade_bar + C_COOL_TRADE: continue
 
         sig = edge_sig[i]
-        if fade:
-            sig = -sig   # reverse direction
+        cur_regime = regime_v[i]
+        if cur_regime == "FADE":
+            sig = -sig   # counter-trend
 
         entry_dir = sig   # +1=long, -1=short
         ep   = b.close
@@ -380,13 +454,14 @@ def run_strategy(bars: List[Bar], atr_v, vwap_v, cum_d_v, cum_dz, dist_vwap,
         tp1  = ep + atr * C_T1_ATR    * entry_dir
         tp2  = ep + atr * C_T2_ATR    * entry_dir
 
-        in_pos      = True
-        pos_dir     = entry_dir
-        entry_px    = ep; stop_px = sp; t1_px = tp1; t2_px = tp2
-        entry_bar   = i
-        t1_hit      = False
-        trail_active= False
-        trail_px    = sp
+        in_pos       = True
+        pos_dir      = entry_dir
+        entry_px     = ep; stop_px = sp; t1_px = tp1; t2_px = tp2
+        entry_bar    = i
+        entry_regime = cur_regime
+        t1_hit       = False
+        trail_active = False
+        trail_px     = sp
 
     # Close any open at end
     if in_pos and bars:
@@ -417,9 +492,19 @@ def print_summary(trades: List[Trade], sym: str, label: str):
         exits[t.exit_reason] = exits.get(t.exit_reason, 0) + 1
     exit_str = "  ".join(f"{k}:{v}" for k, v in sorted(exits.items()))
 
+    # Regime breakdown
+    regimes = {}
+    for t in trades:
+        r = t.regime
+        if r not in regimes:
+            regimes[r] = {"n": 0, "pnl": 0.0, "wins": 0}
+        regimes[r]["n"]    += 1
+        regimes[r]["pnl"]  += t.pnl
+        regimes[r]["wins"] += 1 if t.pnl > 0 else 0
+
     print()
     print("=" * 62)
-    print(f"  EDGE DISCOVERY BACKTEST — {label}  ({sym})")
+    print(f"  EDGE DISCOVERY BACKTEST -- ADAPTIVE REGIME  ({sym})")
     print("=" * 62)
     print(f"  Total trades    : {n}")
     print(f"  Win rate        : {len(wins)/n*100:.1f}%  ({len(wins)}W / {len(loses)}L)")
@@ -428,6 +513,11 @@ def print_summary(trades: List[Trade], sym: str, label: str):
     print(f"  Avg loss        : ${al:,.2f}")
     print(f"  Profit factor   : {pf:.2f}")
     print(f"  Exit reasons    : {exit_str}")
+    print("-" * 62)
+    print(f"  {'Regime':<12}  {'Trades':>6}  {'WR':>6}  {'Net P&L':>10}")
+    for r, d in sorted(regimes.items()):
+        wr = d["wins"] / d["n"] * 100 if d["n"] else 0
+        print(f"  {r:<12}  {d['n']:>6}  {wr:>5.1f}%  ${d['pnl']:>9,.2f}")
     print("=" * 62)
 
 
@@ -437,11 +527,12 @@ def print_summary(trades: List[Trade], sym: str, label: str):
 def write_csv(trades: List[Trade], path: str):
     with open(path, "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["entry_dt","exit_dt","direction","entry_px","stop_px",
+        w.writerow(["entry_dt","exit_dt","direction","regime","entry_px","stop_px",
                     "t1_px","t2_px","exit_px","exit_reason","t1_hit","pnl"])
         for t in trades:
             w.writerow([t.entry_dt, t.exit_dt,
                         "L" if t.direction==1 else "S",
+                        t.regime,
                         t.entry_px, t.stop_px, t.t1_px, t.t2_px,
                         t.exit_px, t.exit_reason, t.t1_hit, t.pnl])
     print(f"  CSV: {path}")
@@ -470,26 +561,18 @@ def main():
     print(f"  Total bars: {len(bars):,}  |  RTH bars: {rth:,}")
 
     print("Pre-computing indicators ...")
-    atr_v, vwap_v, cum_d_v, cum_dz, dist_vwap, edge_sig = precompute(bars)
-    sigs = sum(1 for s in edge_sig if s != 0)
-    print(f"  Edge signals: {sigs:,}")
+    atr_v, vwap_v, cum_d_v, cum_dz, dist_vwap, edge_sig, regime_v = precompute(bars)
+    sigs  = sum(1 for s in edge_sig if s != 0)
+    n_mom = sum(1 for r in regime_v if r == "MOMENTUM")
+    n_fad = sum(1 for r in regime_v if r == "FADE")
+    print(f"  Edge signals: {sigs:,}  |  regime bars: {n_mom:,} MOMENTUM / {n_fad:,} FADE")
 
-    # ── Momentum (follow signal direction)
-    print("Running backtest (MOMENTUM) ...")
-    trades_mom = run_strategy(bars, atr_v, vwap_v, cum_d_v, cum_dz,
-                              dist_vwap, edge_sig, fade=False)
-    print_summary(trades_mom, sym, "MOMENTUM")
-
-    # ── Fade (mean-reversion counter-direction)
-    print("\nRunning backtest (FADE / mean-reversion) ...")
-    trades_fade = run_strategy(bars, atr_v, vwap_v, cum_d_v, cum_dz,
-                               dist_vwap, edge_sig, fade=True)
-    print_summary(trades_fade, sym, "FADE")
-
-    # Write momentum CSV (better direction reported first)
-    best = trades_mom if (sum(t.pnl for t in trades_mom) >=
-                          sum(t.pnl for t in trades_fade)) else trades_fade
-    write_csv(best, out)
+    # ── Adaptive: regime_v decides direction per bar
+    print("Running backtest (ADAPTIVE REGIME) ...")
+    trades = run_strategy(bars, atr_v, vwap_v, cum_d_v, cum_dz,
+                          dist_vwap, edge_sig, regime_v)
+    print_summary(trades, sym, "ADAPTIVE")
+    write_csv(trades, out)
 
 
 if __name__ == "__main__":
