@@ -3,6 +3,10 @@
 *.zip
 NQZ25-CME.*
 
+# Backtest / edge-discovery output CSVs (regenerated; not source of truth)
+IOF_NQ_backtest_*.csv
+IOF_NQ_edge_*.csv
+
 # Python cache
 __pycache__/
 *.pyc
