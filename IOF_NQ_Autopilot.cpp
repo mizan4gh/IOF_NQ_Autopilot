@@ -1609,18 +1609,18 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
         SG_EMAS.Name="V1 EMA slow (internal)"; SG_EMAS.DrawStyle=DRAWSTYLE_IGNORE;
 
         IN_LIVE.Name="Enable Auto Trading (1=live orders)"; IN_LIVE.SetInt(1);
-        IN_CAPITAL.Name="Account Capital ($)"; IN_CAPITAL.SetFloat(50000.0f);
+        IN_CAPITAL.Name="Account Capital ($)"; IN_CAPITAL.SetFloat(150000.0f);  // [v12.24] Apex $150K eval
         IN_DAILY_LOSS.Name="Daily Loss $ (drives risk budget)"; IN_DAILY_LOSS.SetFloat(iof_unified::kDefaultDailyLossUsd);
-        IN_MAX_TRADES.Name="Max Trades/Day"; IN_MAX_TRADES.SetInt(6);
+        IN_MAX_TRADES.Name="Max Trades/Day"; IN_MAX_TRADES.SetInt(3);  // [v12.24] Apex eval: 3 trades caps the day after at most ~2 stops
         IN_FLAT_TIME.Name="Flatten HHMM"; IN_FLAT_TIME.SetInt(iof_unified::kDefaultFlattenHhmm);
         IN_TOTQTY.Name="Max Position Size (1 lot only)"; IN_TOTQTY.SetInt(1); IN_TOTQTY.SetIntLimits(1, 1);
         IN_LOG_LVL.Name="Log Level (0=crit,1=sig,2=dbg)"; IN_LOG_LVL.SetInt(1); IN_LOG_LVL.SetIntLimits(0,2);
         IN_CSV.Name="Enable CSV Journal"; IN_CSV.SetYesNo(1);
-        IN_ENTRY_ORD.Name="Entry (0=mkt,1=lmt,2=lmt+2t)"; IN_ENTRY_ORD.SetInt(0);
+        IN_ENTRY_ORD.Name="Entry (0=mkt,1=lmt,2=lmt+2t)"; IN_ENTRY_ORD.SetInt(2);  // [v12.24] marketable limit — avoids worst-case market fills
         IN_DIAG.Name="Diagnostics (0=off,1=on)"; IN_DIAG.SetInt(1);
         IN_REGIME_FILTER.Name="Regime Mode Filter (0=off)"; IN_REGIME_FILTER.SetInt(1);
         IN_FADE_ENABLE.Name="Fade Engine (0=off)"; IN_FADE_ENABLE.SetInt(1);
-        IN_NEWS_FILTER.Name="News Filter (0=off)"; IN_NEWS_FILTER.SetInt(0);   // [v12.23] default OFF
+        IN_NEWS_FILTER.Name="News Filter (0=off)"; IN_NEWS_FILTER.SetInt(1);   // [v12.24] Apex eval: ON — protect cushion from 08:30/10:00/14:00 ET spikes
         IN_AUTO_DISABLE.Name="Auto-disable bad modes (0=off)"; IN_AUTO_DISABLE.SetInt(1);
         IN_DAILY_PROF.Name="Daily Profit Target $ (0=disabled)"; IN_DAILY_PROF.SetFloat(0.f);  // [v12.23] disabled
         IN_M1_ENABLE.Name="Enable M1 VWAP Reclaim"; IN_M1_ENABLE.SetInt(1);   // [v12.23] default ON
@@ -1635,7 +1635,7 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
         IN_V1_VOL_LB.Name="V1 volume avg lookback"; IN_V1_VOL_LB.SetInt(20); IN_V1_VOL_LB.SetIntLimits(1, 200);
         IN_V1_PACE_LB.Name="V1 pace lookback"; IN_V1_PACE_LB.SetInt(3); IN_V1_PACE_LB.SetIntLimits(1, 50);
         IN_V1_SHARPE_WARN.Name="V1 rolling R-Sharpe warn (mode 4)"; IN_V1_SHARPE_WARN.SetFloat(0.30f);
-        IN_SESSION_START.Name="Session Start HHMM (0=RTH 09:35, 100=01:00 ET)"; IN_SESSION_START.SetInt(100);  // [v12.23]
+        IN_SESSION_START.Name="Session Start HHMM (0=RTH 09:35, 100=01:00 ET)"; IN_SESSION_START.SetInt(0);  // [v12.24] RTH only — overnight session unvalidated
         return;
     }
 
