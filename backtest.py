@@ -120,7 +120,7 @@ C_VWAP_SLP_TOL  = 0.02 # [v12.22] M1 VWAP slope tolerance as ATR fraction (tight
 DAILY_LOSS   = 0.0           # 0 = disabled
 DAILY_PROF   = 0.0           # 0 = disabled
 NEWS_FILTER  = 0             # 0 = off
-ENTRY_ORD    = 1             # 0=mkt @ close, 1=lmt @ close (needs next-bar pullback), 2=lmt+2t (marketable)
+ENTRY_ORD    = 2             # 0=mkt @ close, 1=lmt @ close (needs next-bar pullback), 2=lmt+2t (marketable)
 MAX_TRADES   = 6
 TICK         = 0.25
 PT_VAL       = 20.0          # NQ: $20/point ($5/tick)
@@ -1172,14 +1172,18 @@ class Backtester:
                m6_sp, m6_t1, m6_t2, fd_sp, fd_t1, fd_t2):
 
         # Entry fill model — controlled by ENTRY_ORD (see constants block).
-        #   0 = MARKET    → fill at signal bar close (no slippage).
-        #   1 = LIMIT     → place buy/sell limit at signal close; fill only if
-        #                   the NEXT bar trades through that price (pullback for
-        #                   long, push-up for short). Otherwise the signal is
-        #                   discarded (no trade). Conservative — mirrors a real
-        #                   passive limit that won't pay the spread.
-        #   2 = LIMIT+2t  → marketable limit (2 ticks through the bid/ask in
-        #                   our direction); assume fill at next bar OPEN.
+        # Mirrors cpp ENTRY_ORD semantics (sc.Input[8] in IOF_NQ_Autopilot.cpp).
+        #   0 = MARKET      → fill at signal bar close (no slippage).
+        #   1 = LIMIT       → place buy/sell limit at signal close; fill only
+        #                     if the next bar trades through that price
+        #                     (pullback for long, push-up for short). If the
+        #                     limit isn't touched, the signal is discarded.
+        #                     Conservative — passive limit, no spread paid.
+        #   2 = LIMIT+2t    → marketable limit at signal close ± 2 ticks (in
+        #                     direction of trade). Cpp: Price1 = entryPrice
+        #                     ± TICK*2 — paying 2 ticks to ensure a cross.
+        #                     We assume immediate fill at the limit price
+        #                     (i.e., 2-tick slippage worse than mid).
         if ENTRY_ORD == 0:
             ep = bar.close
         elif ENTRY_ORD == 1:
@@ -1194,10 +1198,7 @@ class Backtester:
             else:
                 return  # limit not touched — no entry
         elif ENTRY_ORD == 2:
-            if i + 1 >= len(self.bars):
-                return
-            nb = self.bars[i + 1]
-            ep = nb.open  # marketable limit assumed filled at next bar open
+            ep = bar.close + (TICK * 2.0 if sl else -TICK * 2.0)
         else:
             ep = bar.close  # unknown mode — default to market
 
