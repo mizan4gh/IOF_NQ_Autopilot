@@ -7,6 +7,9 @@ NQZ25-CME.*
 IOF_NQ_backtest_*.csv
 IOF_NQ_edge_*.csv
 
+# Live trade journals (per-contract; appended to by the running strategy)
+IOF_NQ_NQ*.csv
+
 # Python cache
 __pycache__/
 *.pyc
