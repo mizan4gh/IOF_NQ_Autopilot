@@ -196,9 +196,14 @@ inline float FMin(float a, float b) { return a < b ? a : b; }
 }
 
 // ----- Inlined from iof_unified/iof_defaults.h -----
+// [v12.24] Synced with canonical header values. Previously the inline copy
+//          had drifted: kDefaultDailyLossUsd was 800 here vs 1000 in the
+//          header (the git-log-documented intent was 1000 since commit
+//          09e31b2). Keeping the inline copy and header identical to avoid
+//          surprising runtime defaults when SYNC_FROM_IOFv02.ps1 is skipped.
 namespace iof_unified {
 constexpr int kTargetVolumeBars = 3000;
-constexpr float kDefaultDailyLossUsd = 800.f;
+constexpr float kDefaultDailyLossUsd = 1000.f;
 constexpr float kDefaultDailyProfitUsd = 0.f;   // disabled — no profit cap
 constexpr int kDefaultRthOpenHhmm = 935;
 constexpr int kDefaultFlattenHhmm = 1555;
@@ -2344,23 +2349,38 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
         }
         if(DayDone) return;
 
-        float todayPnL=pos.CumulativeProfitLoss-DayOpenPnL+pos.OpenProfitLoss;
-        if(DAILY_PROF>0.f&&todayPnL>=DAILY_PROF){
+        // [v12.24] Two independent day-P/L views.
+        //   - brokerDayPnL: pos.CumulativeProfitLoss minus the session-start
+        //     snapshot. Reflects ALL activity on the symbol (this strategy,
+        //     other charts, manual trades, ATM exits, ...). Can be skewed
+        //     by external activity or a stale DayOpenPnL after a mid-day
+        //     reload (e.g. 2026-05-11 SETUP row logged DayPnL=+560 with no
+        //     prior CSV trades that day).
+        //   - stratSessPnL: strategy-internal accounting of just *its own*
+        //     realized P/L. Immune to external trades and reload skew.
+        // The DAILY_PROF / DAILY_LOSS caps fire on whichever view crosses
+        // the threshold — conservative by design. Better to halt early
+        // than to over-trade.
+        float brokerDayPnL = pos.CumulativeProfitLoss - DayOpenPnL + pos.OpenProfitLoss;
+        float stratSessPnL = pRisk ? pRisk->sessionPnL : 0.f;
+        if(DAILY_PROF>0.f && (brokerDayPnL>=DAILY_PROF || stratSessPnL>=DAILY_PROF)){
             if(posQty!=0){
                 FlattenReason=FR_DAILY_PROFIT;
                 sc.FlattenAndCancelAllOrders();
                 SCString dl;
-                dl.Format("profit lock hit todayPnL=%.2f cap=%.0f — flatten", todayPnL, DAILY_PROF);
+                dl.Format("profit lock hit (broker=%.2f strat=%.2f) cap=%.0f — flatten",
+                    brokerDayPnL, stratSessPnL, DAILY_PROF);
                 iof_unified::LogDaily(sc, dl, 0);
             }
             DayDone=1; return;
         }
-        if(DAILY_LOSS>0.f&&todayPnL<=-DAILY_LOSS){
+        if(DAILY_LOSS>0.f && (brokerDayPnL<=-DAILY_LOSS || stratSessPnL<=-DAILY_LOSS)){
             if(posQty!=0){
                 FlattenReason=FR_DAILY_LOSS;
                 sc.FlattenAndCancelAllOrders();
                 SCString dl;
-                dl.Format("max loss lock hit todayPnL=%.2f cap=%.0f — flatten", todayPnL, DAILY_LOSS);
+                dl.Format("max loss lock hit (broker=%.2f strat=%.2f) cap=%.0f — flatten",
+                    brokerDayPnL, stratSessPnL, DAILY_LOSS);
                 iof_unified::LogDaily(sc, dl, 0);
             }
             DayDone=1; return;
