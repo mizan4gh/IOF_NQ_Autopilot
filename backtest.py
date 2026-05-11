@@ -1,8 +1,19 @@
 #!/usr/bin/env python3
 """
-IOF NQ Autopilot — Standalone Python Backtester  v1.0
+IOF NQ Autopilot — Standalone Python Backtester  v1.1
 Reads NQZ25-CME.scid (or extracts from .zip), builds 3000-contract volume bars,
-runs strategy logic faithful to IOF_NQ_Autopilot.cpp v12.19, writes CSV journal.
+runs strategy logic faithful to IOF_NQ_Autopilot.cpp v12.24, writes CSV journal.
+
+Mirrored behavioural changes from cpp v12.20 → v12.24:
+  - v12.21/v12.24  M5 (Trap Reversal) removed
+  - v12.24         M7 (Auction Reversal) removed
+  - v12.22         M1 VWAP-slope directional filter (sOKL/sOKS)
+  - v12.24         M1 dead-zone 12:00–13:59 ET
+  - v12.24         M1 directional trend gate (20-bar close vs ATR*0.5)
+  - v12.23/09e31b2 Flatten HHMM = 1555, C_MAX_LOSSES = 2
+
+Knobs at top of file (defaults disable caps + filters for unrestricted sweeps):
+  DAILY_LOSS / DAILY_PROF / NEWS_FILTER / ENTRY_ORD
 
 Usage:
     python backtest.py                              # uses defaults below
@@ -10,7 +21,7 @@ Usage:
 """
 
 import struct, math, os, csv, sys, zipfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import List, Optional, Tuple
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -103,9 +114,13 @@ C_STRUCT_LB  = 25
 C_M5_MIN_SC     = 3    # min score to arm M5
 C_M5_COOLDOWN   = 15   # bars between M5 arms
 C_M5_PHASE3_MAX = 20   # max bars in phase 3 before reset
+C_VWAP_SLP_LB   = 20   # [v12.22] VWAP slope lookback for M1 directional filter
+C_VWAP_SLP_TOL  = 0.02 # [v12.22] M1 VWAP slope tolerance as ATR fraction (tight)
 
-DAILY_LOSS   = 800.0
-DAILY_PROF   = 1000.0        # $1,000 daily profit cap
+DAILY_LOSS   = 0.0           # 0 = disabled
+DAILY_PROF   = 0.0           # 0 = disabled
+NEWS_FILTER  = 0             # 0 = off
+ENTRY_ORD    = 1             # 0=mkt @ close, 1=lmt @ close (needs next-bar pullback), 2=lmt+2t (marketable)
 MAX_TRADES   = 6
 TICK         = 0.25
 PT_VAL       = 20.0          # NQ: $20/point ($5/tick)
@@ -833,10 +848,7 @@ class Backtester:
         self.last_loss_bar  = -1
         self.last_stop_bar  = -1
         self.last_stop_dir  = 0
-        self.last_m5_bar    = -1
-        self.prev_imb_dir   = 0
-        self.prev_imb_str   = 0
-        self.prev_imb_ext   = 0.0
+        # [v12.24] last_m5_bar / prev_imb_* removed with M5/M7 modes.
 
     # ──────────────────────────────────────────────────────────────────────────
     def run(self) -> List[Trade]:
@@ -883,7 +895,6 @@ class Backtester:
             self.day_done   = False
             self.risk.day_reset()
             self.trap.reset()
-            self.last_m5_bar = -1
 
         # ── RTH + flatten ────────────────────────────────────────────────────
         if bar.hhmm >= FLATTEN_HHMM:
@@ -911,12 +922,12 @@ class Backtester:
             return
 
         # ── Entry gates ──────────────────────────────────────────────────────
-        if is_news_window(bar.hhmm):               return
-        if self.day_trades >= MAX_TRADES:          return
-        if self.risk.sess_dd > DAILY_LOSS * 0.8:  return
-        if self.risk.consec_loss >= C_MAX_LOSSES:  return
-        if not self._cool_ok(i):                   return
-        if self._bars_from_open(i) < C_OPEN_COOL: return
+        if NEWS_FILTER and is_news_window(bar.hhmm):                     return
+        if self.day_trades >= MAX_TRADES:                                return
+        if DAILY_LOSS > 0 and self.risk.sess_dd > DAILY_LOSS * 0.8:      return
+        if self.risk.consec_loss >= C_MAX_LOSSES:                        return
+        if not self._cool_ok(i):                                         return
+        if self._bars_from_open(i) < C_OPEN_COOL:                        return
 
         # ── Indicators ───────────────────────────────────────────────────────
         vwap_ok  = i >= C_VWAP_MAT and vwap > 0
@@ -942,13 +953,24 @@ class Backtester:
         # ── Modes ────────────────────────────────────────────────────────────
         m1l = m1s = False
         m2l = m2s = m3l = m3s = m4l = m4s = False
-        m5l = m5s = False
-        m6l = m6s = m7l = m7s = m8l = m8s = False
+        m6l = m6s = m8l = m8s = False
         m6_sp = m6_t1 = m6_t2 = 0.0
-        m7_sp = 0.0
         fade_active = False; fade_edge = fade_type = 0
         fd_sp = fd_t1 = fd_t2 = 0.0
         bk_vs = 99  # balance verify score placeholder for M8
+
+        # [v12.22] M1 VWAP-slope directional filter. Block longs when VWAP is
+        # sloping down (rising tide tape conflicts with the bounce thesis) and
+        # vice versa. Tolerance ATR*0.02 — tight by design; M1 is a reversal
+        # mode and disagreement with VWAP direction is high-cost.
+        s_ok_l = s_ok_s = True
+        if i >= C_VWAP_SLP_LB and vwap > 0 and atr > 0:
+            vp_lb = self.vwap_v[i - C_VWAP_SLP_LB]
+            if vp_lb > 0:
+                slope = vwap - vp_lb
+                tol = atr * C_VWAP_SLP_TOL
+                if slope < -tol: s_ok_l = False
+                if slope >  tol: s_ok_s = False
 
         # M1 — VWAP bounce / reject
         if vwap_ok and atr > 0:
@@ -956,9 +978,9 @@ class Backtester:
             touch = bar.low <= vwap + vw_z and bar.high >= vwap - vw_z
             prev_c = self.bars[i-1].close if i > 0 else bar.close
             if touch:
-                if bull and bar.close > vwap and prev_c > vwap and sc_l >= C_MIN_SC_M1 and ctrl >= 0:
+                if bull and bar.close > vwap and prev_c > vwap and sc_l >= C_MIN_SC_M1 and ctrl >= 0 and s_ok_l:
                     m1l = True
-                if bear and bar.close < vwap and prev_c < vwap and sc_s >= C_MIN_SC_M1 and ctrl <= 0 and not m1l:
+                if bear and bar.close < vwap and prev_c < vwap and sc_s >= C_MIN_SC_M1 and ctrl <= 0 and s_ok_s and not m1l:
                     m1s = True
 
         # M2 — VP level test
@@ -999,18 +1021,8 @@ class Backtester:
             if m4_vwap_edge and bar.high > sw_hi + TICK and bar.close < sw_hi and bear and sc_s >= m4_min and ctrl <= 0:
                 m4s = True
 
-        # M5 — Trap reversal (RTH only: 09:35–15:45)
-        if self.trap.phase == 3 and atr > 0 and bar.hhmm >= 935:
-            m5_cool = self.last_m5_bar < 0 or i > self.last_m5_bar + C_M5_COOLDOWN
-            if m5_cool:
-                if self.trap.direction == +1 and ctrl <= 0:   # bull trap -> fade = short
-                    if dlt < 0 and sc_s >= C_M5_MIN_SC:
-                        m5s = True
-                if self.trap.direction == -1 and ctrl >= 0:   # bear trap -> fade = long
-                    if dlt > 0 and sc_l >= C_M5_MIN_SC:
-                        m5l = True
-                if m5l or m5s:
-                    self.last_m5_bar = i
+        # [v12.24] M5 (Trap Reversal) removed. Was already pruned from the
+        # priority chain in v12.21; detection code is now removed too.
 
         # M6 — Balance breakout
         bk_vs = 10  # mirrors C++ bkVerifyScore=10; stays 10 if no breakout so M8 gate (<=4) stays closed
@@ -1071,39 +1083,8 @@ class Backtester:
                         m6_t1 = bal.lo - rw * 0.5
                         m6_t2 = bal.lo - rw
 
-        # M7 — Auction reversal
-        if imb.active:
-            self.prev_imb_dir = imb.direction
-            self.prev_imb_str = imb.strength
-            self.prev_imb_ext = imb.extreme
-        if self.prev_imb_dir != 0 and atr > 0:
-            imb_dead   = (not imb.active) and self.prev_imb_str >= 3
-            imb_fading = imb.active and imb.strength < self.prev_imb_str - 1
-            if imb_dead or imb_fading:
-                rv = 0; rev = -self.prev_imb_dir
-                if i >= 3:
-                    dm0 = abs(self.bars[i].ask_vol   - self.bars[i].bid_vol)
-                    dm1 = abs(self.bars[i-1].ask_vol - self.bars[i-1].bid_vol)
-                    dm2 = abs(self.bars[i-2].ask_vol - self.bars[i-2].bid_vol)
-                    if dm0 < dm1 < dm2: rv += 1
-                # VWAP ±2SD level
-                ext = self.prev_imb_ext
-                if self.prev_imb_dir > 0 and vb2u > 0 and ext >= vb2u - atr * 0.3: rv += 1
-                elif self.prev_imb_dir < 0 and vb2l > 0 and ext <= vb2l + atr * 0.3: rv += 1
-                # Divergence
-                if rev > 0 and div.strength >= 2:  rv += 1
-                if rev < 0 and div.strength <= -2: rv += 1
-                # Trap phase
-                if self.trap.phase >= 2: rv += 1
-                # Volume surge
-                avg_vol = sum(self.bars[j].volume for j in range(max(0,i-7), i+1)) / 8
-                if bar.volume > avg_vol * 1.8: rv += 1
-                if rv >= 3:   # simplified (production = 5)
-                    if rev > 0:
-                        m7l = True; m7_sp = self.prev_imb_ext - atr * 0.3
-                    else:
-                        m7s = True; m7_sp = self.prev_imb_ext + atr * 0.3
-                    self.prev_imb_dir = 0
+        # [v12.24] M7 (Auction Reversal) removed. The mode was dropped from
+        # the priority chain and the detection block is now also stripped.
 
         # M8 — Fade (balance breakout fade, type 1)
         if not m6l and not m6s and bal.mature and atr > 0 and bk_vs <= 4:
@@ -1127,7 +1108,7 @@ class Backtester:
                     fd_sp = bar.low - atr * 0.3
                     fd_t1 = bal.poc; fd_t2 = bal.hi
 
-        # ── Priority: M6 > M7 > M5 > M8 > M4 > M3 > M2 > M1 ───────────────
+        # ── Priority: M6 > M8 (fade) > M4 > M3 > M2 > M1   [v12.24 — M5+M7 removed]
         sel = -1; sl = False
         if   m6l: sel = 5; sl = True
         elif m6s: sel = 5
@@ -1183,23 +1164,46 @@ class Backtester:
         # ── Enter trade ───────────────────────────────────────────────────────
         self._enter(i, bar, sel, sl, atr, final_sc, ctrl, div,
                     tr, vr, cr, fade_active, fade_edge, fade_type,
-                    m6_sp, m6_t1, m6_t2, m7_sp, fd_sp, fd_t1, fd_t2)
+                    m6_sp, m6_t1, m6_t2, fd_sp, fd_t1, fd_t2)
 
     # ──────────────────────────────────────────────────────────────────────────
     def _enter(self, i, bar, sel, sl, atr, score, ctrl, div,
                tr, vr, cr, fade_active, fade_edge, fade_type,
-               m6_sp, m6_t1, m6_t2, m7_sp, fd_sp, fd_t1, fd_t2):
+               m6_sp, m6_t1, m6_t2, fd_sp, fd_t1, fd_t2):
 
-        ep = bar.close  # market fill on bar close
+        # Entry fill model — controlled by ENTRY_ORD (see constants block).
+        #   0 = MARKET    → fill at signal bar close (no slippage).
+        #   1 = LIMIT     → place buy/sell limit at signal close; fill only if
+        #                   the NEXT bar trades through that price (pullback for
+        #                   long, push-up for short). Otherwise the signal is
+        #                   discarded (no trade). Conservative — mirrors a real
+        #                   passive limit that won't pay the spread.
+        #   2 = LIMIT+2t  → marketable limit (2 ticks through the bid/ask in
+        #                   our direction); assume fill at next bar OPEN.
+        if ENTRY_ORD == 0:
+            ep = bar.close
+        elif ENTRY_ORD == 1:
+            if i + 1 >= len(self.bars):
+                return  # last bar — no next bar to fill against
+            nb = self.bars[i + 1]
+            target = bar.close
+            if sl and nb.low <= target:
+                ep = target
+            elif (not sl) and nb.high >= target:
+                ep = target
+            else:
+                return  # limit not touched — no entry
+        elif ENTRY_ORD == 2:
+            if i + 1 >= len(self.bars):
+                return
+            nb = self.bars[i + 1]
+            ep = nb.open  # marketable limit assumed filled at next bar open
+        else:
+            ep = bar.close  # unknown mode — default to market
 
         # Stop / target
         if sel == 5 and m6_sp:
             sp, t1, t2 = m6_sp, m6_t1, m6_t2
-        elif sel == 6 and m7_sp:
-            sp = m7_sp
-            sd = abs(ep - sp)
-            t1 = ep + sd * 1.5 if sl else ep - sd * 1.5
-            t2 = ep + sd * 3.0 if sl else ep - sd * 3.0
         elif sel == 7 and fade_active:
             sp, t1, t2 = fd_sp, fd_t1, fd_t2
         else:
@@ -1346,16 +1350,24 @@ class Backtester:
         self.last_trade_bar = i
         self.risk.trade_done(pnl)
 
-        t = self.cur_trade
-        t.event    = "EXIT"
-        t.exit_px  = round(ex_px, 2)
-        t.exit_rsn = reason
-        t.hold     = i - self.entry_bar
-        t.mae      = round(self._mae, 2)
-        t.mfe      = round(self._mfe, 2)
-        t.day_pnl  = round(self.day_pnl, 2)
-        t.tot_pnl  = round(self.tot_pnl, 2)
-        self.out.append(t)
+        # [v12.24] Emit a new EXIT trade via dataclasses.replace() rather than
+        # mutating the SETUP record in place. The old code mutated cur_trade
+        # then appended it; since the SETUP record had already been appended
+        # to self.out at entry time, the same Python object ended up listed
+        # twice — both showing event="EXIT" after mutation. Bug surfaced as
+        # CSV double-writes and inflated W/L counts in the printed summary.
+        exit_trade = replace(
+            self.cur_trade,
+            event   = "EXIT",
+            exit_px = round(ex_px, 2),
+            exit_rsn= reason,
+            hold    = i - self.entry_bar,
+            mae     = round(self._mae, 2),
+            mfe     = round(self._mfe, 2),
+            day_pnl = round(self.day_pnl, 2),
+            tot_pnl = round(self.tot_pnl, 2),
+        )
+        self.out.append(exit_trade)
 
         self.in_pos = False; self.cur_trade = None
         self.t1_hit = False; self.t1_bar = -1
@@ -1444,7 +1456,7 @@ def write_csv(trades: List[Trade], path: str):
                 "FadeEdge": t.fade_edge, "FadeType": t.fade_type,
                 "RiskMult": t.risk_mult, "TrendReg": t.trend_reg,
                 "VolReg": t.vol_reg, "ChopReg": t.chop_reg,
-                "Version": "v12.19-py",
+                "Version": "v12.24-py",
             })
 
 # ─────────────────────────────────────────────────────────────────────────────
