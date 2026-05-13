@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """
-IOF NQ Autopilot — Standalone Python Backtester  v1.1
+IOF NQ Autopilot — Standalone Python Backtester  v1.2
 Reads NQZ25-CME.scid (or extracts from .zip), builds 3000-contract volume bars,
-runs strategy logic faithful to IOF_NQ_Autopilot.cpp v12.24, writes CSV journal.
+runs strategy logic faithful to IOF_NQ_Autopilot.cpp v12.25, writes CSV journal.
 
-Mirrored behavioural changes from cpp v12.20 → v12.24:
+Mirrored behavioural changes from cpp v12.20 → v12.25:
   - v12.21/v12.24  M5 (Trap Reversal) removed
   - v12.24         M7 (Auction Reversal) removed
   - v12.22         M1 VWAP-slope directional filter (sOKL/sOKS)
   - v12.24         M1 dead-zone 12:00–13:59 ET
   - v12.24         M1 directional trend gate (20-bar close vs ATR*0.5)
   - v12.23/09e31b2 Flatten HHMM = 1555, C_MAX_LOSSES = 2
+  - v12.25         CtrlScore gates: M3 (already gated), M6 soft (±1),
+                   M8 strict (±0). Mirrors cpp v12.25 fixes derived from
+                   2026-05-13 live-trade analysis.
 
 Knobs at top of file (defaults disable caps + filters for unrestricted sweeps):
   DAILY_LOSS / DAILY_PROF / NEWS_FILTER / ENTRY_ORD
@@ -1082,6 +1085,11 @@ class Backtester:
                         m6_sp = bal.lo + atr * 0.25
                         m6_t1 = bal.lo - rw * 0.5
                         m6_t2 = bal.lo - rw
+        # [v12.25] M6 soft CtrlScore gate. Block only on clearly opposing control.
+        if m6l and ctrl < -1:
+            m6l = False; m6_sp = m6_t1 = m6_t2 = 0.0
+        if m6s and ctrl > 1:
+            m6s = False; m6_sp = m6_t1 = m6_t2 = 0.0
 
         # [v12.24] M7 (Auction Reversal) removed. The mode was dropped from
         # the priority chain and the detection block is now also stripped.
@@ -1107,6 +1115,11 @@ class Backtester:
                     m8l = True; fade_active = True; fade_type = 1; fade_edge = edge
                     fd_sp = bar.low - atr * 0.3
                     fd_t1 = bal.poc; fd_t2 = bal.hi
+        # [v12.25] M8 strict CtrlScore gate. Fades require neutral/correct-side flow.
+        if m8l and ctrl < 0:
+            m8l = False; fade_active = False; fade_edge = 0; fade_type = 0
+        if m8s and ctrl > 0:
+            m8s = False; fade_active = False; fade_edge = 0; fade_type = 0
 
         # ── Priority: M6 > M8 (fade) > M4 > M3 > M2 > M1   [v12.24 — M5+M7 removed]
         sel = -1; sl = False
@@ -1457,7 +1470,7 @@ def write_csv(trades: List[Trade], path: str):
                 "FadeEdge": t.fade_edge, "FadeType": t.fade_type,
                 "RiskMult": t.risk_mult, "TrendReg": t.trend_reg,
                 "VolReg": t.vol_reg, "ChopReg": t.chop_reg,
-                "Version": "v12.24-py",
+                "Version": "v12.25-py",
             })
 
 # ─────────────────────────────────────────────────────────────────────────────
