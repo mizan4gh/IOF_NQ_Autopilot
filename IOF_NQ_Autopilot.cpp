@@ -2,7 +2,7 @@
 //  IOF NQ — Pure Orderflow Autopilot
 //  Sierra Chart ACSIL Study
 //
-//  Version: v12.24 (May 2026; M7 removed; M1 dead-zone + trend gate)
+//  Version: v12.25 (May 2026; CtrlScore gate on M6/M8)
 //
 //  CHANGES SINCE v11:
 //    [v12.1] RM floor 0.80 -> 0.60, Kelly cold-start 0.8 -> 0.9.
@@ -105,6 +105,40 @@
 //    [v12.22] M5 (Trap Reversal) mode restored. All modes active: M1–M8.
 //             Phase-3 trap progression and M5 signal block reinstated from v12.20
 //             state (reclaim-reset, phase-3 timeout, DL/DS-only entry, ctrl>=0 gate).
+//
+//    [v12.25] CtrlScore gate retrofit on M6 and M8 (post-live analysis 2026-05-13):
+//             (a) M8 (Fade Engine): strict gate. Block LONG when controlScore<0,
+//                 block SHORT when controlScore>0. Mirrors the M4/M5 ±0 intent
+//                 (v12.20 changelog (d)). Live trade 2026-05-13 SELL M8 fired
+//                 against CtrlScore=+1 (buyer bias) and lost -$685 on full stop;
+//                 this gate would have blocked it. pFade->reset() on rejection
+//                 so downstream FadeEdge/FadeType logs cleanly.
+//             (b) M6 (Breakout): soft gate. Block LONG only when controlScore<-1,
+//                 block SHORT only when controlScore>+1. Softer threshold because
+//                 M6 already enforces flow alignment via pImb->direction and the
+//                 DL/DS current-bar delta requirement at line 3116-3117 — strict
+//                 ±0 would suppress valid breakouts on neutral-narrow control.
+//             (c) M3 (Consolidation Breakout/Rejection): strict gate. Block LONG
+//                 when controlScore<0, block SHORT when controlScore>0. M3 was
+//                 the third remaining ungated mode after the M6/M8 retrofit.
+//             (d) M7 firing block removed. M7 was excluded from the signal
+//                 combination in v12.24 but its rvVerifyScore>=5 branch still
+//                 fired m7L/m7S AND cleared PrevImbDir/Str/Extreme. M8 type 2
+//                 (range fade at line ~3296) reads those vars, so every
+//                 M7-quality setup silently disabled M8 type 2 on subsequent
+//                 bars. rvVerifyScore computation kept (M8 type 2 still uses
+//                 it). m7L/m7S/m7Stop declarations kept as harmless false/0
+//                 placeholders for the diagnostic log and the now-unreachable
+//                 selMode==6 exit-computation branch (queued for cleanup).
+//             (e) STOP/TRAIL exits now use broker-derived fill price (when
+//                 available and adverse) instead of hardcoded StopPx. Previous
+//                 behavior recorded the configured SL as the fill, causing
+//                 CSV ExitPx to disagree with broker DayPnL by the slippage
+//                 amount (1 tick on Wed 2026-05-13's M8 stop-out). pRisk and
+//                 pMS now see realized PnL, keeping equity-curve and Kelly
+//                 stats aligned with the broker. Guarded by the existing
+//                 v12.24 5x-stop-dist plausibility check on HasBrokerPx and a
+//                 direction check (broker fill must be on adverse side of SL).
 //
 //    [v12.24] Backtest-derived filter sync:
 //             (a) M7 (Auction Reversal) removed from signal combination and
@@ -805,7 +839,7 @@ static void WriteCSV(SCStudyInterfaceRef& sc, const char* Evt, const char* Side,
               "%d,%d,%.0f,%.2f,"
               "%.2f,%s,%d,%.2f,%.2f,"
               "%.2f,%.2f,%d,%d,"
-              "%.2f,%d,%d,%d,v12.24,%llu\n",
+              "%.2f,%d,%d,%d,v12.25,%llu\n",
         Y,Mo,D,Hr,Mi,Se,Evt,Side,Mode,Entry,SL,TP1,TP2,Qty,Score,
         CtrlSc,DivStr,Delta,BarSpd,
         ExitPx,ExitR,Hold,MAE,MFE,
@@ -1572,7 +1606,7 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
     if(sc.SetDefaults){
         sc.GraphName="IOF NQ Autopilot";
         sc.StudyDescription="IOF NQ Pure Orderflow (May 2026). "
-            "v12.24: Active modes M1-M4,M6,M8 (M5+M7 removed). "
+            "v12.25: Active modes M1-M4,M6,M8 (M5+M7 removed). CtrlScore gates M3/M6/M8. "
             "M1 ON with dead-zone(12-14h) + trend gate. News OFF, $800 daily loss cap, no profit cap. "
             "Night+RTH session from 01:00 ET (SESSION_START input). "
             "1 contract only. 3k (3000) vol bars. CSV IOF_NQ_*.csv.";
@@ -1889,7 +1923,7 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
     if(!BannerShown && DIAG) {
         InitRunID();
         SCString m;
-        m.Format("=== V18A v12.24 LOAD sym=%s tick=%.4f tickval=$%.2f Cap=$%.0f DailyLoss=$%.0f DailyProf=$%.0f "
+        m.Format("=== V18A v12.25 LOAD sym=%s tick=%.4f tickval=$%.2f Cap=$%.0f DailyLoss=$%.0f DailyProf=$%.0f "
                  "MaxTr=%d FlatT=%d Qty=%d Live=%d Regime=%d Fade=%d News=%d AutoDis=%d M1=%d V1hooks=%d "
                  "RM_FLOOR=%.2f QUAL_FLOOR=%d CD_trd=%d CD_loss=%d CD_stop=%d RunID=%llu ===",
             sc.Symbol.GetChars(), TICK, TICK_VAL, Capital, DAILY_LOSS, DAILY_PROF,
@@ -2010,6 +2044,39 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
                     High0, Low0, StopPx, T1Px, T2Px,
                     Hold, Close0, HasBrokerPx ? ExPxFromBroker : Close0);
                 sc.AddMessageToLog(warn, 1);
+            }
+        }
+
+        // [v12.25] Broker-fill correction for STOP/TRAIL exits.
+        //          STOP/TRAIL paths previously hardcoded ExPx=StopPx — the
+        //          "ideal" stop level — even when the broker bracket actually
+        //          filled past it in fast markets. Live trade 2026-05-13 Wed:
+        //          SL=29334.72, recorded ExPx=29334.72, but broker DayPnL=-$685
+        //          implied actual fill ≈ 29335.25 (1 tick of slippage). The
+        //          local PnL was off by ~$10, and equity-curve / Kelly stats
+        //          (driven by pRisk->updatePnL(PnL) below) drift slightly low.
+        //
+        //          Fix: when HasBrokerPx is true (sanity-guarded earlier at the
+        //          5x-stop-dist threshold) AND the broker fill is on the adverse
+        //          side of StopPx AND the slip is meaningful (> 0.5 tick), use
+        //          the broker fill as ExPx. PnL is recomputed from ExPx in the
+        //          next statement, so this also corrects local accounting.
+        if((strcmp(ExR,"STOP")==0 || strcmp(ExR,"TRAIL")==0) && HasBrokerPx){
+            bool adverse = isL ? (ExPxFromBroker <= StopPx + TICK)
+                               : (ExPxFromBroker >= StopPx - TICK);
+            float slip = isL ? (StopPx - ExPxFromBroker)
+                             : (ExPxFromBroker - StopPx);
+            if(adverse && FAbs(ExPxFromBroker - StopPx) > TICK*0.5f){
+                if(LOG_LVL >= LOG_SIG){
+                    SCString s; s.Format(
+                        "[V18A EXIT][SLIPPAGE] %s broker fill=%.2f vs "
+                        "StopPx=%.2f (slip=%.2f pts, $%.0f). Using broker "
+                        "fill for ExPx and recomputing local PnL.",
+                        ExR, ExPxFromBroker, StopPx, slip,
+                        slip * PtVal * (float)EntryQty);
+                    sc.AddMessageToLog(s, 0);
+                }
+                ExPx = ExPxFromBroker;
             }
         }
 
@@ -3054,6 +3121,10 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
             if((uRej||bkDn)&&cS>=C_MIN_SCORE_ALL) m3S=true;
         }
     }
+    // [v12.25] M3 strict CtrlScore gate. Consolidation breakouts/rejections
+    //          require neutral/correct-side flow (mirrors M1/M2/M4/M5).
+    if(m3L && controlScore < 0) m3L=false;
+    if(m3S && controlScore > 0) m3S=false;
 
     // ============================================================================
     //  M4 — SWEEP + RECLAIM
@@ -3176,6 +3247,9 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
             }
         }
     }
+    // [v12.25] M6 soft CtrlScore gate. Block only on clearly opposing control.
+    if(m6L && controlScore < -1){ m6L=false; m6Stop=0.f; m6T1=0.f; m6T2=0.f; }
+    if(m6S && controlScore >  1){ m6S=false; m6Stop=0.f; m6T1=0.f; m6T2=0.f; }
 
     // ============================================================================
     //  M7 — AUCTION REVERSAL (R1-R8)
@@ -3226,11 +3300,15 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
             if(revDir>0&&pIce&&pIce->askIceberg) ctrIce=true;
             if(revDir<0&&pIce&&pIce->bidIceberg) ctrIce=true;
             if(!ctrIce) rvVerifyScore++;
-            if(rvVerifyScore>=5){
-                if(revDir>0){m7L=true; m7Stop=PrevImbExtreme-ATR*0.3f;}
-                else{m7S=true; m7Stop=PrevImbExtreme+ATR*0.3f;}
-                PrevImbDir=0; PrevImbStr=0; PrevImbExtreme=0.f;
-            }
+            // [v12.25] M7 firing removed. rvVerifyScore is still consumed by
+            //          M8 type 2 (range fade) at lines below — that block
+            //          requires PrevImb* state, which the old m7L/m7S firing
+            //          path used to wipe via `PrevImbDir=0; PrevImbStr=0;
+            //          PrevImbExtreme=0.f;`. Result: any M7-quality setup
+            //          silently disabled M8 type 2 on subsequent bars.
+            //          M7 was removed from goS/goL in v12.24 but its
+            //          state-mutation lingered. Fix: do nothing here; let
+            //          rvVerifyScore propagate to M8 type 2 cleanly.
         }
     }
 
@@ -3348,6 +3426,10 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
                 }
             }
         }
+        // [v12.25] M8 strict CtrlScore gate. Fades require neutral/correct-side flow.
+        //          Mirrors v12.20 (d) intent for M5. Covers all FadeTypes 1-4.
+        if(m8L && controlScore < 0){ m8L=false; pFade->reset(); }
+        if(m8S && controlScore > 0){ m8S=false; pFade->reset(); }
     }
 
     // ============================================================================
