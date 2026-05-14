@@ -951,8 +951,9 @@ class Backtester:
         if NEWS_FILTER and is_news_window(bar.hhmm):                     return
 
         # Volume-spike detection + cooldown (mirrors Autopilot.cpp:2092-2120).
-        # Gated by NEWS_FILTER in the C++; replicating the same gate here.
-        if NEWS_FILTER and i >= 1:
+        # Decoupled from NEWS_FILTER — runs regardless of news filter setting
+        # so spike protection survives even when news blackouts are disabled.
+        if i >= 1:
             prev      = self.bars[i - 1]
             prev_atr  = self.atr_v[i - 1] if i >= 2 else atr
             prev_avgd = self.avg_d[i - 1] if i >= 2 else max(1.0, self.avg_d[i])

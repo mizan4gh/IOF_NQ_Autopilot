@@ -16,13 +16,15 @@ SCID = BASE / (sys.argv[1] if len(sys.argv) > 1 else "NQZ25-CME.scid")
 
 _APEX = dict(
     C_COOL_TRADE=5, C_COOL_LOSS=10, C_COOL_STOP=10,
-    NEWS_FILTER=1, DAILY_LOSS=800.0, DAILY_PROF=1000.0,
+    C_OPEN_COOL=36, C_VCOOL_PAUSE=40,
+    DAILY_LOSS=800.0, DAILY_PROF=1000.0,
     MAX_TRADES=3, ENTRY_ORD=2,
 )
 
+# News filter A/B (post-decoupling: spike state always runs)
 SCENARIOS = {
-    "baseline": {**_APEX, "C_OPEN_COOL": 36, "C_VCOOL_PAUSE": 40},
-    "reduced":  {**_APEX, "C_OPEN_COOL": 18, "C_VCOOL_PAUSE": 40},
+    "news_on":  {**_APEX, "NEWS_FILTER": 1},
+    "news_off": {**_APEX, "NEWS_FILTER": 0},
 }
 
 

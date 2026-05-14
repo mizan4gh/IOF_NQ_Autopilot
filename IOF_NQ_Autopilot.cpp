@@ -2074,21 +2074,22 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
     }
 
     // ============================================================================
-    //  NEWS / VOLATILITY BLACKOUT
+    //  NEWS BLACKOUT (NEWS_FILTER-gated) + SPIKE/VCOOL PROTECTION (always on)
+    //  Decoupled so disabling News Filter keeps volume-spike safety net.
     // ============================================================================
-    if(NEWS_FILTER && pNews){
-        if(pNews->isNewsWindow(BarHHMM)){
-            int currentWindow=0;
-            if(BarHHMM>=825&&BarHHMM<=835) currentWindow=1;
-            else if(BarHHMM>=955&&BarHHMM<=1005) currentWindow=2;
-            else if(BarHHMM>=1355&&BarHHMM<=1405) currentWindow=3;
-            bool newWindow=(BarDate!=NewsLogSession)||(currentWindow!=NewsLogWindow);
-            if(DIAG&&newWindow){
-                NewsLogSession=BarDate; NewsLogWindow=currentWindow;
-                sc.AddMessageToLog("NEWS BLACKOUT — no new entries",0);
-            }
-            goto TRADE_MGMT;
+    if(NEWS_FILTER && pNews && pNews->isNewsWindow(BarHHMM)){
+        int currentWindow=0;
+        if(BarHHMM>=825&&BarHHMM<=835) currentWindow=1;
+        else if(BarHHMM>=955&&BarHHMM<=1005) currentWindow=2;
+        else if(BarHHMM>=1355&&BarHHMM<=1405) currentWindow=3;
+        bool newWindow=(BarDate!=NewsLogSession)||(currentWindow!=NewsLogWindow);
+        if(DIAG&&newWindow){
+            NewsLogSession=BarDate; NewsLogWindow=currentWindow;
+            sc.AddMessageToLog("NEWS BLACKOUT — no new entries",0);
         }
+        goto TRADE_MGMT;
+    }
+    if(pNews){
         if(Idx>=1){
             float prevRange=sc.High[Idx-1]-sc.Low[Idx-1];
             float prevATR=(Idx>=2)?SG_ATR[Idx-1]:ATR;
