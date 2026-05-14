@@ -1607,9 +1607,9 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
         sc.GraphName="IOF NQ Autopilot";
         sc.StudyDescription="IOF NQ Pure Orderflow (May 2026). "
             "v12.25: Active modes M1-M4,M6,M8 (M5+M7 removed). CtrlScore gates M3/M6/M8. "
-            "M1 ON with dead-zone(12-14h) + trend gate. News OFF, $800 daily loss cap, no profit cap. "
-            "Night+RTH session from 01:00 ET (SESSION_START input). "
-            "1 contract only. 3k (3000) vol bars. CSV IOF_NQ_*.csv.";
+            "M1 ON with dead-zone(12-14h) + trend gate. News ON, $1000 daily loss cap, no profit cap. "
+            "RTH only (09:35 ET open, 15:55 flatten). Apex $150K eval Phase 1: 1 contract, 3 trades/day. "
+            "3k (3000) vol bars. CSV IOF_NQ_*.csv.";
         sc.AutoLoop=1; sc.GraphRegion=0;
         sc.SendOrdersToTradeService=0; sc.AllowOnlyOneTradePerBar=0;
         sc.MaximumPositionAllowed=1; sc.SupportReversals=0;
