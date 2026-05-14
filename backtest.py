@@ -107,6 +107,10 @@ C_COOL_TRADE = 5
 C_COOL_LOSS  = 10
 C_COOL_STOP  = 10
 C_OPEN_COOL  = 36
+C_SPIKE_ATR_M  = 3.0   # bar range spike: range >= 3x ATR
+C_VCOOL_THRESH = 7.0   # deep vol-cool: range/ATR >= 7 triggers extended pause
+C_VCOOL_PAUSE  = 40    # bars suppressed by deep vol cooldown
+C_SPIKE_COOL   = 20    # bars suppressed by range/delta spike state
 C_VWAP_MAT   = 40
 C_DELTA_MAT  = 25
 C_CONSOL_LB  = 25
@@ -853,6 +857,20 @@ class Backtester:
         self.last_stop_dir  = 0
         # [v12.24] last_m5_bar / prev_imb_* removed with M5/M7 modes.
 
+        # Spike / volume-cool state (mirrors C++ pNews + pVCool; NEWS_FILTER gated)
+        self.spike_bar       = -1
+        self.spike_active    = False
+        self.vcool_remaining = 0
+        self.vcool_spike_bar = -1
+
+        # Diagnostics
+        self.dbg_range_spike   = 0   # range_spike condition fired
+        self.dbg_delta_spike   = 0   # delta_spike condition fired
+        self.dbg_vcool_trigger = 0   # range_ratio >= C_VCOOL_THRESH fired
+        self.dbg_spike_blocked = 0   # bar suppressed by spike cooldown
+        self.dbg_vcool_blocked = 0   # bar suppressed by vcool pause
+        self.dbg_max_range_ratio = 0.0  # peak observed range_ratio
+
     # ──────────────────────────────────────────────────────────────────────────
     def run(self) -> List[Trade]:
         print(f"  Pre-computing indicators ({self.n:,} bars)...")
@@ -878,6 +896,11 @@ class Backtester:
         warmup = max(C_STRUCT_LB, ATR_PER + 5, 40)
         for i in range(warmup, self.n):
             self._step(i)
+
+        print(f"  [DIAG] spike triggers: range={self.dbg_range_spike} delta={self.dbg_delta_spike} "
+              f"vcool_threshold_hits={self.dbg_vcool_trigger} | "
+              f"bars_blocked spike={self.dbg_spike_blocked} vcool={self.dbg_vcool_blocked} | "
+              f"peak_range_ratio={self.dbg_max_range_ratio:.2f}")
 
         return self.out
 
@@ -926,6 +949,42 @@ class Backtester:
 
         # ── Entry gates ──────────────────────────────────────────────────────
         if NEWS_FILTER and is_news_window(bar.hhmm):                     return
+
+        # Volume-spike detection + cooldown (mirrors Autopilot.cpp:2092-2120).
+        # Gated by NEWS_FILTER in the C++; replicating the same gate here.
+        if NEWS_FILTER and i >= 1:
+            prev      = self.bars[i - 1]
+            prev_atr  = self.atr_v[i - 1] if i >= 2 else atr
+            prev_avgd = self.avg_d[i - 1] if i >= 2 else max(1.0, self.avg_d[i])
+            prev_range  = prev.high - prev.low
+            prev_delta  = prev.ask_vol - prev.bid_vol
+            range_ratio = (prev_range / prev_atr) if prev_atr > 0 else 0.0
+            if range_ratio > self.dbg_max_range_ratio:
+                self.dbg_max_range_ratio = range_ratio
+            range_spike = prev_atr > 0 and prev_range > prev_atr * C_SPIKE_ATR_M
+            delta_spike = abs(prev_delta) > prev_avgd * 4.0 and range_ratio >= 2.0
+            if (range_spike or delta_spike) and self.spike_bar != i - 1:
+                self.spike_bar    = i - 1
+                self.spike_active = True
+                if range_spike: self.dbg_range_spike += 1
+                if delta_spike: self.dbg_delta_spike += 1
+                if range_ratio >= C_VCOOL_THRESH and self.vcool_spike_bar != i - 1:
+                    self.vcool_remaining = C_VCOOL_PAUSE
+                    self.vcool_spike_bar = i - 1
+                    self.dbg_vcool_trigger += 1
+
+            if self.spike_active and C_SPIKE_COOL > 0 and i <= self.spike_bar + C_SPIKE_COOL:
+                self.dbg_spike_blocked += 1
+                return
+            else:
+                self.spike_active = False
+
+            if self.vcool_remaining > 0:
+                self.vcool_remaining -= 1
+                if self.vcool_remaining > 0:
+                    self.dbg_vcool_blocked += 1
+                    return
+
         if self.day_trades >= MAX_TRADES:                                return
         if DAILY_LOSS > 0 and self.risk.sess_dd > DAILY_LOSS * 0.8:      return
         if self.risk.consec_loss >= C_MAX_LOSSES:                        return
