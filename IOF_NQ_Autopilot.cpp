@@ -1406,7 +1406,7 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
         IN_FADE_ENABLE.Name="Fade Engine (0=off)"; IN_FADE_ENABLE.SetInt(1);
         IN_NEWS_FILTER.Name="News Filter (0=off)"; IN_NEWS_FILTER.SetInt(1);   // [v12.24] Apex eval: ON — protect cushion from 08:30/10:00/14:00 ET spikes
         IN_AUTO_DISABLE.Name="Auto-disable bad modes (0=off)"; IN_AUTO_DISABLE.SetInt(1);
-        IN_DAILY_PROF.Name="Daily Profit Target $ (0=disabled)"; IN_DAILY_PROF.SetFloat(0.f);  // [v12.23] disabled
+        IN_DAILY_PROF.Name="Daily Profit Target $ (0=disabled)"; IN_DAILY_PROF.SetFloat(1000.f);  // Apex eval: lock in +$1000 day, halt and flatten
         IN_M1_ENABLE.Name="Enable M1 VWAP Reclaim"; IN_M1_ENABLE.SetInt(1);   // [v12.23] default ON
         IN_SESSION_START.Name="Session Start HHMM (0=RTH 09:35, 100=01:00 ET)"; IN_SESSION_START.SetInt(0);  // [v12.24] RTH only — overnight session unvalidated
         return;
