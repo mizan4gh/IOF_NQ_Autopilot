@@ -308,7 +308,6 @@ All of these must pass before an order is submitted:
 | Consecutive loss | `ConsecLoss >= C_MAX_LOSSES (2)` — hard block, not just sizing | SKIP log |
 | RM floor | `riskMultiplier < 0.60` | SKIP log |
 | Regime filter | Mode blocked by trend/chop/vol state | GATE CSV |
-| V1 hooks | Confirmation or chop gate fails | V1HOOK log |
 | Auto-disable | Mode t-stat < -1.0 (n>=20) | SKIP log |
 | Post-stop cooldown | Same-direction entry within 10 bars of a stop-out | SKIP log |
 | Quality floor | `qScore100 < 50` | SKIP log |
@@ -477,7 +476,7 @@ CSV `Version` column reads `v12.25-py` to distinguish from live DLL output.
 
 **Standard 6-month baseline** (see `IOF_NQ_Backtest_Input_Profile.txt`):
 - Regime filter: on | Fade engine: on | News filter: on | Auto-disable: on
-- M1 VWAP reclaim: off | V1 hooks: off (mode 0)
+- M1 VWAP reclaim: off
 
 ---
 
@@ -525,7 +524,6 @@ IOF_NQ_Production_Final/
 ├── playbook.md                       <- this file
 ├── IOF_NQ_Backtest_Input_Profile.txt
 ├── IOF_NQ_NQM6.CME.csv               <- live trade journal (current contract)
-├── iof_v1_hooks.h                    <- V1 hooks (inlined in .cpp; dev copy)
 ├── iof_unified/
 │   ├── iof_defaults.h                <- risk constants
 │   ├── iof_math.h                    <- FAbs/FMax/FMin

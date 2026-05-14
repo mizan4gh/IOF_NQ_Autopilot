@@ -203,12 +203,11 @@
 //  Backtest (typical): load ~6 months of RTH on 3k volume bars; Daily Loss $ + Daily Profit $ inputs
 //  at 1000/1000 for a $1k envelope; Trade >> Trade Simulation + study **Enable Auto Trading = 1**.
 //
-//  Archived rule-stack study: IOFv02/legacy/NQ_RTH_OrderFlow_Strategy_V1.cpp (reference only;
-//  confirmations/chop/R-Sharpe live in iof_v1_hooks.h). One auto-trader per symbol/account.
+//  Archived rule-stack study: IOFv02/legacy/NQ_RTH_OrderFlow_Strategy_V1.cpp (reference only).
+//  One auto-trader per symbol/account.
 //
-//  Headers iof_unified/* + iof_v1_hooks.h are pasted below so Sierra **remote** build
-//  (single .cpp upload) succeeds; edit the standalone copies under IOFv02/iof_unified/
-//  and IOFv02/iof_v1_hooks.h, then mirror changes here.
+//  Headers iof_unified/* are pasted below so Sierra **remote** build (single .cpp upload)
+//  succeeds; edit the standalone copies under IOFv02/iof_unified/ then mirror changes here.
 // ============================================================================
 
 #include "sierrachart.h"
@@ -281,301 +280,6 @@ inline void LogDaily(SCStudyInterfaceRef& sc, const SCString& body, int isError 
 inline void LogState(SCStudyInterfaceRef& sc, const SCString& body, int isError = 1) { LogLine(sc, "STATE", body, isError); }
 }
 
-// ----- Inlined from iof_v1_hooks.h (keep in sync with IOFv02/iof_v1_hooks.h) -----
-namespace iof_v1 {
-
-static const int kRingCap = 32;
-static const int kPiRingCount = 44;
-static const int kPfRing0 = 60;
-
-static inline float TypicalPrice(SCStudyInterfaceRef& sc, int i)
-{
-    return (sc.High[i] + sc.Low[i] + sc.Close[i]) / 3.f;
-}
-
-static inline float BarDelta(SCStudyInterfaceRef& sc, int i)
-{
-    if (i < 0) return 0.f;
-    return sc.AskVolume[i] - sc.BidVolume[i];
-}
-
-static inline float SumDelta(SCStudyInterfaceRef& sc, int i, int lb)
-{
-    float s = 0.f;
-    const int n = (std::max)(1, lb);
-    for (int k = 0; k < n && i - k >= 0; k++)
-        s += BarDelta(sc, i - k);
-    return s;
-}
-
-static inline float AvgVol(SCStudyInterfaceRef& sc, int i, int lb)
-{
-    if (i < 0) return 0.f;
-    double a = 0.0;
-    const int n = (std::max)(1, lb);
-    int c = 0;
-    for (int k = 0; k < n && i - k >= 0; k++, c++)
-        a += (double)sc.Volume[i - k];
-    return c > 0 ? (float)(a / (double)c) : 0.f;
-}
-
-struct Confirmations
-{
-    bool deltaTrend, imbalanceAgg, absorptionProxy, failedAuction, volumeRel, pace;
-    int nAggressive, nStructural, nTotal;
-    void Clear()
-    {
-        deltaTrend = imbalanceAgg = absorptionProxy = failedAuction = volumeRel = pace = false;
-        nAggressive = nStructural = nTotal = 0;
-    }
-    void Tally(int minAgg, int minStruct, int minTotal, bool& ok) const
-    {
-        ok = (nTotal >= minTotal) && (nAggressive >= minAgg) && (nStructural >= minStruct);
-    }
-};
-
-static inline void BuildConfirmations(SCStudyInterfaceRef& sc, int Idx, int dir,
-    float deltaThresh, float imbThresh, int volLb, float volMult, int paceLb, Confirmations& o)
-{
-    o.Clear();
-    const float bd = BarDelta(sc, Idx);
-    const float bdPrev = BarDelta(sc, Idx - 1);
-    const float sumD = SumDelta(sc, Idx, 4);
-    if (dir > 0)
-    {
-        o.deltaTrend = (bd > deltaThresh) || (bd > bdPrev + deltaThresh * 0.5f && bd > 0.f)
-            || (sumD > deltaThresh * 2.f);
-    }
-    else if (dir < 0)
-    {
-        o.deltaTrend = (bd < -deltaThresh) || (bd < bdPrev - deltaThresh * 0.5f && bd < 0.f)
-            || (sumD < -deltaThresh * 2.f);
-    }
-    float aSum = 0.f, bSum = 0.f;
-    for (int k = 0; k < 5 && Idx - k >= 0; k++)
-    {
-        aSum += sc.AskVolume[Idx - k];
-        bSum += sc.BidVolume[Idx - k];
-    }
-    const float totAB = aSum + bSum;
-    if (dir > 0 && totAB > 0.f)
-        o.imbalanceAgg = (aSum / totAB) >= imbThresh;
-    else if (dir < 0 && totAB > 0.f)
-        o.imbalanceAgg = (bSum / totAB) >= imbThresh;
-    const float tick = (sc.TickSize > 0.f) ? sc.TickSize : 0.25f;
-    const float rng = iof_unified::FMax(tick * 2.f, sc.High[Idx] - sc.Low[Idx]);
-    if (dir > 0)
-        o.absorptionProxy = (bd < 0.f) && (sc.Close[Idx] > sc.Low[Idx] + rng * 0.35f);
-    else if (dir < 0)
-        o.absorptionProxy = (bd > 0.f) && (sc.Close[Idx] < sc.High[Idx] - rng * 0.35f);
-    if (Idx >= 1)
-    {
-        if (dir > 0)
-            o.failedAuction = (sc.Low[Idx] < sc.Low[Idx - 1] - tick * 2.f)
-                && (sc.Close[Idx] > sc.Low[Idx - 1]);
-        else if (dir < 0)
-            o.failedAuction = (sc.High[Idx] > sc.High[Idx - 1] + tick * 2.f)
-                && (sc.Close[Idx] < sc.High[Idx - 1]);
-    }
-    const float av = AvgVol(sc, Idx - 1, volLb);
-    o.volumeRel = (av > 0.f && sc.Volume[Idx] >= av * volMult);
-    float vNow = sc.Volume[Idx], vPrev = AvgVol(sc, Idx - 1, paceLb);
-    if (dir > 0)
-        o.pace = vNow >= vPrev * 1.15f && sc.Close[Idx] >= sc.Open[Idx];
-    else if (dir < 0)
-        o.pace = vNow >= vPrev * 1.15f && sc.Close[Idx] <= sc.Open[Idx];
-    o.nAggressive = (o.deltaTrend ? 1 : 0) + (o.imbalanceAgg ? 1 : 0) + (o.pace ? 1 : 0);
-    o.nStructural = (o.absorptionProxy ? 1 : 0) + (o.failedAuction ? 1 : 0) + (o.volumeRel ? 1 : 0);
-    o.nTotal = o.nAggressive + o.nStructural;
-}
-
-static inline float ComputeChopScore(SCStudyInterfaceRef& sc, int Idx, int vwapCrossLb,
-    int emaFlatLb, float emaFlatAtr, int overlapLb, float vwap, const SCSubgraphRef& emaFast, float atr)
-{
-    if (Idx < 20 || atr <= 0.f) return 50.f;
-    int crosses = 0;
-    for (int k = 1; k <= vwapCrossLb && Idx - k >= 1; k++)
-    {
-        const float v0 = sc.Close[Idx - k] - vwap;
-        const float v1 = sc.Close[Idx - k - 1] - vwap;
-        if ((v0 > 0.f && v1 < 0.f) || (v0 < 0.f && v1 > 0.f))
-            crosses++;
-    }
-    const float crossScore = iof_unified::FMin(40.f, (float)crosses * 8.f);
-    float emaMove = atr;
-    if (emaFlatLb > 0 && Idx >= emaFlatLb)
-        emaMove = iof_unified::FAbs(emaFast[Idx] - emaFast[Idx - emaFlatLb]);
-    const float flatScore = (emaMove < emaFlatAtr * atr) ? 25.f : 0.f;
-    float overlap = 0.f;
-    const float tick = (sc.TickSize > 0.f) ? sc.TickSize : 0.25f;
-    for (int k = 0; k < overlapLb && Idx - k - 1 >= 0; k++)
-    {
-        const float h = iof_unified::FMin(sc.High[Idx - k], sc.High[Idx - k - 1]);
-        const float l = iof_unified::FMax(sc.Low[Idx - k], sc.Low[Idx - k - 1]);
-        if (h >= l)
-            overlap += (h - l) / iof_unified::FMax(atr, tick * 4.f);
-    }
-    const float ovScore = iof_unified::FMin(25.f, overlap * 6.f);
-    const float d0 = BarDelta(sc, Idx), d1 = BarDelta(sc, Idx - 1);
-    const bool weakDeltaFollow = (iof_unified::FAbs(d0) < iof_unified::FAbs(d1) * 0.6f && iof_unified::FAbs(d0) < (sc.Volume[Idx] * 0.05f + 1.f));
-    const float dScore = weakDeltaFollow ? 10.f : 0.f;
-    return iof_unified::FMin(100.f, crossScore + flatScore + ovScore + dScore);
-}
-
-static inline void RingPushR(SCStudyInterfaceRef& sc, float rMult)
-{
-    int& count = sc.GetPersistentInt(kPiRingCount);
-    if (count < kRingCap)
-    {
-        sc.GetPersistentFloat(kPfRing0 + count) = rMult;
-        count++;
-    }
-    else
-    {
-        for (int i = 1; i < kRingCap; i++)
-            sc.GetPersistentFloat(kPfRing0 + i - 1) = sc.GetPersistentFloat(kPfRing0 + i);
-        sc.GetPersistentFloat(kPfRing0 + kRingCap - 1) = rMult;
-    }
-}
-
-static inline float RingSharpe(SCStudyInterfaceRef& sc, int lookback)
-{
-    const int count = sc.GetPersistentInt(kPiRingCount);
-    const int nUse = (std::min)(lookback, count);
-    if (nUse < 2) return 1.f;
-    float rs[kRingCap];
-    const int start = count - nUse;
-    for (int i = 0; i < nUse; i++)
-        rs[i] = sc.GetPersistentFloat(kPfRing0 + start + i);
-    double mean = 0.0;
-    for (int i = 0; i < nUse; i++) mean += rs[i];
-    mean /= (double)nUse;
-    double var = 0.0;
-    for (int i = 0; i < nUse; i++)
-    {
-        const double d = rs[i] - mean;
-        var += d * d;
-    }
-    var /= (double)(nUse > 1 ? (nUse - 1) : 1);
-    if (var < 0.0) var = 0.0;
-    const double stdv = sqrt(var);
-    if (stdv < 1e-6) return (float)(mean > 0.0 ? 1.0 : -1.0);
-    return (float)(mean / stdv * sqrt((double)nUse));
-}
-
-static inline void ResetRing(SCStudyInterfaceRef& sc)
-{
-    sc.GetPersistentInt(kPiRingCount) = 0;
-    for (int z = 0; z < kRingCap; z++)
-        sc.GetPersistentFloat(kPfRing0 + z) = 0.f;
-}
-
-struct V1HookRejectDetail
-{
-    int code;
-    int minCUsed;
-    int nTot, nAgg, nStruct;
-    bool dt, imb, absp, fa, vr, pc;
-    float chopScore;
-    int ringCount;
-    float sharpeVal;
-    int sharpeRaisedMin;
-};
-
-static inline int HooksRejectCode(SCStudyInterfaceRef& sc, int Idx, int n,
-    int mode, bool selLong, float vwap, float atr, const SCSubgraphRef& emaFast,
-    int minConf, float chopMax,
-    int vwapCrossLb, int emaFlatLb, float emaFlatAtr, int overlapLb,
-    float deltaTh, float imbTh, int volLb, float volMult, int paceLb,
-    int sharpeLb, int sharpeMinN, float sharpeWarn, int minConfSharpeWarn,
-    V1HookRejectDetail* out)
-{
-    if (out)
-    {
-        out->code = 0;
-        out->nTot = out->nAgg = out->nStruct = 0;
-        out->dt = out->imb = out->absp = out->fa = out->vr = out->pc = false;
-        out->chopScore = 0.f;
-        out->sharpeRaisedMin = 0;
-    }
-    if (mode <= 0) return 0;
-    const bool needConf = (mode == 1 || mode == 3 || mode == 4);
-    const bool needChop = (mode == 2 || mode == 3 || mode == 4);
-    int minC = minConf;
-    if (mode == 4)
-    {
-        const int ringCount = sc.GetPersistentInt(kPiRingCount);
-        const float sharpeVal = RingSharpe(sc, sharpeLb);
-        if (ringCount >= sharpeMinN && sharpeVal < sharpeWarn)
-        {
-            minC = (std::max)(minC, minConfSharpeWarn);
-            if (out) out->sharpeRaisedMin = 1;
-        }
-    }
-    if (out)
-    {
-        out->minCUsed = minC;
-        out->ringCount = sc.GetPersistentInt(kPiRingCount);
-        out->sharpeVal = RingSharpe(sc, sharpeLb);
-    }
-    const int dir = selLong ? +1 : -1;
-    if (needConf)
-    {
-        Confirmations cf;
-        BuildConfirmations(sc, Idx, dir, deltaTh, imbTh, volLb, volMult, paceLb, cf);
-        bool confOK = false;
-        cf.Tally(1, 1, minC, confOK);
-        if (!confOK)
-        {
-            if (out)
-            {
-                out->code = 1;
-                out->nTot = cf.nTotal;
-                out->nAgg = cf.nAggressive;
-                out->nStruct = cf.nStructural;
-                out->dt = cf.deltaTrend;
-                out->imb = cf.imbalanceAgg;
-                out->absp = cf.absorptionProxy;
-                out->fa = cf.failedAuction;
-                out->vr = cf.volumeRel;
-                out->pc = cf.pace;
-            }
-            return 1;
-        }
-    }
-    if (needChop)
-    {
-        if (chopMax > 0.f && Idx >= 20 && atr > 0.f)
-        {
-            const float chop = ComputeChopScore(sc, Idx, vwapCrossLb, emaFlatLb, emaFlatAtr,
-                overlapLb, vwap, emaFast, atr);
-            if (chop > chopMax)
-            {
-                if (out)
-                {
-                    out->code = 2;
-                    out->chopScore = chop;
-                }
-                return 2;
-            }
-        }
-    }
-    return 0;
-}
-
-static inline bool HooksPass(SCStudyInterfaceRef& sc, int Idx, int n,
-    int mode, bool selLong, float vwap, float atr, const SCSubgraphRef& emaFast,
-    int minConf, float chopMax,
-    int vwapCrossLb, int emaFlatLb, float emaFlatAtr, int overlapLb,
-    float deltaTh, float imbTh, int volLb, float volMult, int paceLb,
-    int sharpeLb, int sharpeMinN, float sharpeWarn, int minConfSharpeWarn)
-{
-    return HooksRejectCode(sc, Idx, n, mode, selLong, vwap, atr, emaFast, minConf, chopMax,
-            vwapCrossLb, emaFlatLb, emaFlatAtr, overlapLb, deltaTh, imbTh, volLb, volMult, paceLb,
-            sharpeLb, sharpeMinN, sharpeWarn, minConfSharpeWarn, nullptr) == 0;
-}
-
-} // namespace iof_v1
 
 using iof_unified::FAbs;
 using iof_unified::FMax;
@@ -1505,7 +1209,8 @@ enum PersistInt {
     PI_LastSymbolHash  = 41,
     PI_BannerShown     = 42,
     PI_LastExitWasLoss = 43,
-    // 44–91: reserved for iof_v1_hooks.h (ring count + R-multiples); do not reuse.
+    // 44–91: previously reserved for iof_v1_hooks.h ring (removed v12.26).
+    // Slots remain unused to preserve PI numbering for any in-flight chartbooks.
 };
 
 enum PersistFloat {
@@ -1592,15 +1297,10 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
     SCInputRef IN_AUTO_DISABLE=sc.Input[13];
     SCInputRef IN_DAILY_PROF=sc.Input[14];
     SCInputRef IN_M1_ENABLE=sc.Input[15];   // [v12.5] toggle M1 on/off
-    SCInputRef IN_V1_HOOKS=sc.Input[16];
-    SCInputRef IN_V1_MIN_CONF=sc.Input[17];
-    SCInputRef IN_V1_CHOP_MAX=sc.Input[18];
-    SCInputRef IN_V1_DELTA_TH=sc.Input[19];
-    SCInputRef IN_V1_IMB_TH=sc.Input[20];
-    SCInputRef IN_V1_VOL_MULT=sc.Input[21];
-    SCInputRef IN_V1_VOL_LB=sc.Input[22];
-    SCInputRef IN_V1_PACE_LB=sc.Input[23];
-    SCInputRef IN_V1_SHARPE_WARN=sc.Input[24];
+    // sc.Input[16..24] previously held the V1 hooks layer (removed v12.26 after
+    // backtest showed legacy confirmation thresholds incompatible with v12.25
+    // modes on 3k volume bars). Gap is deliberate — keeps Input[25] addressable
+    // from existing chartbook saves.
     SCInputRef IN_SESSION_START=sc.Input[25];  // [v12.23] 0=RTH only, 100=01:00 ET
 
     if(sc.SetDefaults){
@@ -1708,17 +1408,6 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
         IN_AUTO_DISABLE.Name="Auto-disable bad modes (0=off)"; IN_AUTO_DISABLE.SetInt(1);
         IN_DAILY_PROF.Name="Daily Profit Target $ (0=disabled)"; IN_DAILY_PROF.SetFloat(0.f);  // [v12.23] disabled
         IN_M1_ENABLE.Name="Enable M1 VWAP Reclaim"; IN_M1_ENABLE.SetInt(1);   // [v12.23] default ON
-        IN_V1_HOOKS.Name="V1 hooks (0=off 1=conf 2=chop 3=both 4=both+Sharpe warn)";
-        IN_V1_HOOKS.SetInt(0); IN_V1_HOOKS.SetIntLimits(0, 4);
-        IN_V1_MIN_CONF.Name="V1 min confirmations total (agg>=1 struct>=1 required)"; IN_V1_MIN_CONF.SetInt(3);
-        IN_V1_MIN_CONF.SetIntLimits(1, 6);
-        IN_V1_CHOP_MAX.Name="V1 chop score max (0=off chop gate)"; IN_V1_CHOP_MAX.SetFloat(62.f);
-        IN_V1_DELTA_TH.Name="V1 delta threshold"; IN_V1_DELTA_TH.SetFloat(12.f);
-        IN_V1_IMB_TH.Name="V1 imbalance threshold"; IN_V1_IMB_TH.SetFloat(0.58f);
-        IN_V1_VOL_MULT.Name="V1 volume confirm mult"; IN_V1_VOL_MULT.SetFloat(1.1f);
-        IN_V1_VOL_LB.Name="V1 volume avg lookback"; IN_V1_VOL_LB.SetInt(20); IN_V1_VOL_LB.SetIntLimits(1, 200);
-        IN_V1_PACE_LB.Name="V1 pace lookback"; IN_V1_PACE_LB.SetInt(3); IN_V1_PACE_LB.SetIntLimits(1, 50);
-        IN_V1_SHARPE_WARN.Name="V1 rolling R-Sharpe warn (mode 4)"; IN_V1_SHARPE_WARN.SetFloat(0.30f);
         IN_SESSION_START.Name="Session Start HHMM (0=RTH 09:35, 100=01:00 ET)"; IN_SESSION_START.SetInt(0);  // [v12.24] RTH only — overnight session unvalidated
         return;
     }
@@ -1747,15 +1436,6 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
     const int AUTO_DISABLE=IN_AUTO_DISABLE.GetInt();
     const float DAILY_PROF=IN_DAILY_PROF.GetFloat();
     const int M1_ENABLE=IN_M1_ENABLE.GetInt();   // [v12.5]
-    const int V1_HOOKS=IN_V1_HOOKS.GetInt();
-    const int V1_MIN_CONF=IN_V1_MIN_CONF.GetInt();
-    const float V1_CHOP_MAX=IN_V1_CHOP_MAX.GetFloat();
-    const float V1_DELTA_TH=IN_V1_DELTA_TH.GetFloat();
-    const float V1_IMB_TH=IN_V1_IMB_TH.GetFloat();
-    const float V1_VOL_MULT=IN_V1_VOL_MULT.GetFloat();
-    const int V1_VOL_LB=IN_V1_VOL_LB.GetInt();
-    const int V1_PACE_LB=IN_V1_PACE_LB.GetInt();
-    const float V1_SHARPE_WARN=IN_V1_SHARPE_WARN.GetFloat();
     if(TICK<=0.f)return;
 
     // Wilder ATR on chart OHLC (same units as price). Works on any bar type including
@@ -1916,7 +1596,6 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
         } else if(LastSymbolHash != h) {
             LogError(sc, "Symbol changed mid-chart; state is stale. Reload the study.");
             LastSymbolHash = h;
-            iof_v1::ResetRing(sc);
         }
     }
 
@@ -1924,11 +1603,11 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
         InitRunID();
         SCString m;
         m.Format("=== V18A v12.25 LOAD sym=%s tick=%.4f tickval=$%.2f Cap=$%.0f DailyLoss=$%.0f DailyProf=$%.0f "
-                 "MaxTr=%d FlatT=%d Qty=%d Live=%d Regime=%d Fade=%d News=%d AutoDis=%d M1=%d V1hooks=%d "
+                 "MaxTr=%d FlatT=%d Qty=%d Live=%d Regime=%d Fade=%d News=%d AutoDis=%d M1=%d "
                  "RM_FLOOR=%.2f QUAL_FLOOR=%d CD_trd=%d CD_loss=%d CD_stop=%d RunID=%llu ===",
             sc.Symbol.GetChars(), TICK, TICK_VAL, Capital, DAILY_LOSS, DAILY_PROF,
             MAX_TRADES, FLAT_TIME, TOTQTY, IN_LIVE.GetInt(),
-            REGIME_FILTER, FADE_ENABLE, NEWS_FILTER, AUTO_DISABLE, M1_ENABLE, V1_HOOKS,
+            REGIME_FILTER, FADE_ENABLE, NEWS_FILTER, AUTO_DISABLE, M1_ENABLE,
             C_RM_FLOOR, V18A_QUALITY_FLOOR,
             C_COOLDOWN_AFTER_TRADE, C_COOLDOWN_AFTER_LOSS, C_POST_STOP_COOLDOWN,
             g_runID);
@@ -2120,13 +1799,6 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
         }
         LastExitWasLoss = isLoss ? 1 : 0;
 
-        {
-            float riskPts = FAbs(EntryPx - StopPx);
-            float rDoll = riskPts * PtVal * (float)EntryQty;
-            float rMult = (rDoll > 1.f) ? (PnL / rDoll) : 0.f;
-            iof_v1::RingPushR(sc, rMult);
-        }
-
         TradeState=0; T1Hit=0; T1HitBar=-1; LastExitBar=Idx;
         TradeMAE=0.f; TradeMFE=0.f; TradeMode=-1;
         LiveTradeDir=0;
@@ -2285,7 +1957,6 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
         if(pRisk){pRisk->newSession(); pRisk->setDailyBudget(DAILY_LOSS);}
         if(pRegime) pRegime->reset();
         if(pID) pID->currOpen=Close0;
-        iof_v1::ResetRing(sc);
 
         if(DIAG){SCString m;m.Format("=== V18A SESSION %d Capital=$%.0f Budget=$%.0f ===",
             BarDate, Capital, DAILY_LOSS);
@@ -3504,50 +3175,6 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
             float pc20 = sc.Close[Idx] - sc.Close[Idx-20];
             if(selLong  && pc20 < -ATR*0.5f) return;
             if(!selLong && pc20 >  ATR*0.5f) return;
-        }
-    }
-
-    if(V1_HOOKS>0){
-        const int nSz=sc.ArraySize;
-        static const int kV1SharpeLb=20;
-        static const int kV1SharpeMinN=8;
-        static const int kV1MinConfRaise=4;
-        static const int kV1VwapX=12;
-        static const int kV1EmaFlatLb=6;
-        static const float kV1EmaFlatAtr=0.08f;
-        static const int kV1OverlapLb=4;
-        iof_v1::V1HookRejectDetail v1det;
-        const int v1rc = iof_v1::HooksRejectCode(sc, Idx, nSz, V1_HOOKS, selLong, VWAP, ATR, SG_EMAF,
-                V1_MIN_CONF, V1_CHOP_MAX, kV1VwapX, kV1EmaFlatLb, kV1EmaFlatAtr, kV1OverlapLb,
-                V1_DELTA_TH, V1_IMB_TH, V1_VOL_LB, V1_VOL_MULT, V1_PACE_LB,
-                kV1SharpeLb, kV1SharpeMinN, V1_SHARPE_WARN, kV1MinConfRaise, &v1det);
-        if(v1rc != 0){
-            if(Idx != LastBlockLogBar){
-                LastBlockLogBar = Idx;
-                if(LOG_LVL >= LOG_SIG){
-                    SCString m;
-                    if(v1rc == 1){
-                        m.Format("[V18A V1HOOK] CONF_FAIL M%d %s min>=%d tot=%d agg=%d str=%d "
-                            "D%d I%d A%d F%d V%d P%d Sharpe=%.2f ring=%d tightMin=%d",
-                            selMode + 1, selLong ? "L" : "S", v1det.minCUsed, v1det.nTot, v1det.nAgg, v1det.nStruct,
-                            v1det.dt ? 1 : 0, v1det.imb ? 1 : 0, v1det.absp ? 1 : 0, v1det.fa ? 1 : 0,
-                            v1det.vr ? 1 : 0, v1det.pc ? 1 : 0,
-                            v1det.sharpeVal, v1det.ringCount, v1det.sharpeRaisedMin);
-                    } else {
-                        m.Format("[V18A V1HOOK] CHOP_FAIL M%d %s score=%.1f max=%.1f Sharpe=%.2f ring=%d",
-                            selMode + 1, selLong ? "L" : "S", v1det.chopScore, V1_CHOP_MAX,
-                            v1det.sharpeVal, v1det.ringCount);
-                    }
-                    sc.AddMessageToLog(m, 0);
-                }
-                if(DIAG && LOG_LVL >= LOG_DBG){
-                    SCString d;
-                    d.Format("[V18A V1HOOK DBG] Idx=%d selMode=%d VWAP=%.2f ATR=%.2f hookMode=%d rc=%d",
-                        Idx, selMode, VWAP, ATR, V1_HOOKS, v1rc);
-                    sc.AddMessageToLog(d, 0);
-                }
-            }
-            return;
         }
     }
 

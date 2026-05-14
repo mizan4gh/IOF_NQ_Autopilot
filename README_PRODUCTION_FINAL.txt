@@ -7,9 +7,9 @@ DLL name:    IOF_NQ_Autopilot  (see SCDLLName in the .cpp)
 Build line:  v12.19 (see header comment in IOF_NQ_Autopilot.cpp)
 
 This folder mirrors IOFv02/ production sources. The study itself is a **single
-.cpp**: shared logic from iof_unified/*.h and iof_v1_hooks.h is **inlined** in
-IOF_NQ_Autopilot.cpp so Sierra ACS_Source / remote build work when you
-may only place **one** source file (no subfolder required).
+.cpp**: shared logic from iof_unified/*.h is **inlined** in IOF_NQ_Autopilot.cpp
+so Sierra ACS_Source / remote build work when you may only place **one** source
+file (no subfolder required).
 
 --------------------------------------------------------------------------------
 WHAT TO COMPILE
@@ -19,8 +19,8 @@ WHAT TO COMPILE
 
   Sierra supplies: sierrachart.h (do not copy from this repo).
 
-  Optional in this folder: iof_unified\*.h and iof_v1_hooks.h — copies for
-  development sync from IOFv02; the running study code lives inside the .cpp.
+  Optional in this folder: iof_unified\*.h — copies for development sync from
+  IOFv02; the running study code lives inside the .cpp.
 
   Do NOT add a second autopilot .cpp in the same ACS_Source build unless you
   intend two DLLs.
