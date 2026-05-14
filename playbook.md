@@ -159,7 +159,7 @@ These are compiled in; not exposed as inputs. All ATR values are Wilder(14) on O
 | C_COOLDOWN_AFTER_TRADE | 5 bars | Bars blocked after any completed trade (v12.3 halved from 10) |
 | C_COOLDOWN_AFTER_LOSS | 10 bars | Bars blocked after a losing trade (v12.3 halved from 15) |
 | C_POST_STOP_COOLDOWN | 10 bars | Bars blocked after a stop-out (v12.3 halved from 15). Direction-specific — opposite direction is allowed immediately |
-| C_OPEN_COOL | 18 bars | Bars suppressed at RTH open before entries allowed (halved from 36 per cooldown A/B) |
+| C_OPEN_COOL | 36 bars | Bars suppressed at RTH open before entries allowed |
 | C_VWAP_MATURE | 40 bars | Bars required before VWAP-dependent modes (M1, M2, M3) fire |
 | C_DELTA_MATURE | 25 bars | Bars required before cumulative delta is considered mature |
 | C_STRUCT_LB | 25 bars | Structure lookback for control score / swing detection |

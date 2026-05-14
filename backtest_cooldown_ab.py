@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 BASE = Path(__file__).parent
-SCID = BASE / "NQZ25-CME.scid"
+SCID = BASE / (sys.argv[1] if len(sys.argv) > 1 else "NQZ25-CME.scid")
 
 _APEX = dict(
     C_COOL_TRADE=5, C_COOL_LOSS=10, C_COOL_STOP=10,
@@ -21,8 +21,8 @@ _APEX = dict(
 )
 
 SCENARIOS = {
-    "baseline":     {**_APEX, "C_OPEN_COOL": 36, "C_VCOOL_PAUSE": 40},
-    "vcool_only":   {**_APEX, "C_OPEN_COOL": 36, "C_VCOOL_PAUSE": 20},
+    "baseline": {**_APEX, "C_OPEN_COOL": 36, "C_VCOOL_PAUSE": 40},
+    "reduced":  {**_APEX, "C_OPEN_COOL": 18, "C_VCOOL_PAUSE": 40},
 }
 
 

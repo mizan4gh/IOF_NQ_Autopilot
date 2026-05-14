@@ -332,7 +332,7 @@ static const int   C_COOLDOWN_AFTER_LOSS  = 10;
 static const int   C_POST_STOP_COOLDOWN   = 10;
 
 static const int   C_DELTA_LB       = 15;
-static const int   C_OPEN_COOL      = 18;  // Halved from 36 per cooldown A/B (backtest.py NQZ25 6mo, n=9→12): +71% PnL, WR 55.6→75.0, PF 2.88→3.95, max DD unchanged.
+static const int   C_OPEN_COOL      = 36;
 static const int   C_VWAP_MATURE    = 40;
 static const int   C_STRUCT_LB      = 25;
 static const float C_STRUCT_MAX     = 1.5f;
