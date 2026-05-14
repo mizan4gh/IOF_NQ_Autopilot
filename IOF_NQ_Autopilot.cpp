@@ -1394,7 +1394,7 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
 
         IN_LIVE.Name="Enable Auto Trading (1=live orders)"; IN_LIVE.SetInt(1);
         IN_CAPITAL.Name="Account Capital ($)"; IN_CAPITAL.SetFloat(150000.0f);  // [v12.24] Apex $150K eval
-        IN_DAILY_LOSS.Name="Daily Loss $ (drives risk budget)"; IN_DAILY_LOSS.SetFloat(iof_unified::kDefaultDailyLossUsd);
+        IN_DAILY_LOSS.Name="Daily Loss $ (drives risk budget)"; IN_DAILY_LOSS.SetFloat(800.f);  // Apex $150K eval: $800/day caps you at ~5 stop-out days before liquidation
         IN_MAX_TRADES.Name="Max Trades/Day"; IN_MAX_TRADES.SetInt(3);  // [v12.24] Apex eval: 3 trades caps the day after at most ~2 stops
         IN_FLAT_TIME.Name="Flatten HHMM"; IN_FLAT_TIME.SetInt(iof_unified::kDefaultFlattenHhmm);
         IN_TOTQTY.Name="Max Position Size (1 lot only)"; IN_TOTQTY.SetInt(1); IN_TOTQTY.SetIntLimits(1, 1);
