@@ -3313,6 +3313,23 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
         tp1Price  = pFade->t1Px;
         tp2Price  = pFade->t2Px;
     }
+    // [v12.26] Tick-snap M6/M7/M8 levels. Live 2026-05-15 NQM6 BUY M8: TP1
+    //          computed at 29311.09 (off-tick); broker snapped the bracket to
+    //          29311.00, filled at 29310.50, and the internal exit detector
+    //          (High0>=29311.09) missed it — tagged EXTERNAL instead of TP1,
+    //          poisoning M8 win-rate stats. M1-M5 path below already snaps;
+    //          mirror it here so brackets and detector agree on tick grid.
+    if(selMode==5 || selMode==6 || selMode==7){
+        if(selLong){
+            stopPrice = TFloor(stopPrice, TICK);
+            tp1Price  = TCeil (tp1Price,  TICK);
+            tp2Price  = TCeil (tp2Price,  TICK);
+        } else {
+            stopPrice = TCeil (stopPrice, TICK);
+            tp1Price  = TFloor(tp1Price,  TICK);
+            tp2Price  = TFloor(tp2Price,  TICK);
+        }
+    }
     else {
         // M1-M5 use ATR-based stop/target with floor/ceiling caps
         float stopDist = ATR * C_STOP_ATR;
