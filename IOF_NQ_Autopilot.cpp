@@ -2152,6 +2152,24 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
         // than to over-trade.
         float brokerDayPnL = pos.CumulativeProfitLoss - DayOpenPnL + pos.OpenProfitLoss;
         float stratSessPnL = pRisk ? pRisk->sessionPnL : 0.f;
+        // [v12.26] Diag: trace gate inputs to reconcile against CSV DayPnL
+        //          column. Investigating 2026-05-15 NQM6 case where CSV row
+        //          logged brokerDayPnL=$1035 at SETUP yet daily-profit cap
+        //          ($1000) did not fire. Same formula both sides — this
+        //          log captures what the gate actually saw at evaluation.
+        //          One line per new bar; LOG_SIG so it shows by default.
+        static int s_LastGateLogBar = -1;
+        if(LOG_LVL >= LOG_SIG && DAILY_PROF > 0.f && Idx != s_LastGateLogBar){
+            s_LastGateLogBar = Idx;
+            SCString g; g.Format(
+                "[V18A GATE] Idx=%d DAILY_PROF=%.0f brokerDayPnL=%.2f "
+                "stratSessPnL=%.2f DayOpenPnL=%.2f CumPL=%.2f OpenPL=%.2f "
+                "posQty=%d",
+                Idx, DAILY_PROF, brokerDayPnL, stratSessPnL,
+                DayOpenPnL, pos.CumulativeProfitLoss, pos.OpenProfitLoss,
+                posQty);
+            sc.AddMessageToLog(g, 0);
+        }
         if(DAILY_PROF>0.f && (brokerDayPnL>=DAILY_PROF || stratSessPnL>=DAILY_PROF)){
             if(posQty!=0){
                 FlattenReason=FR_DAILY_PROFIT;
