@@ -102,11 +102,11 @@ Modes are evaluated every bar. At most one fires per bar. Priority (v12.24): **M
 | M6 | 5 | Balance Breakout | Reversal | score x10 | Highest priority; breakout from balance structure. CtrlScore soft gate (±1) added in v12.25 |
 | M8 | 7 | Fade Engine | Counter-trend | edge x10 | Enabled by Fade Engine input. CtrlScore strict gate added in v12.25 |
 
-**Quality floor:** `V18A_QUALITY_FLOOR = 50` — `qScore100` must be >= 50 to submit any entry.
+**Quality floor:** `V18A_QUALITY_FLOOR = 40` (v12.26 tuning, was 50) — `qScore100` must be >= 40 to submit any entry.
 
-- M1/M2/M3 use `finalScore × 100 / 15` — needs score >= 8/15 to clear floor 50.
-- M4/M6 use `score × 10` — score >= 5 clears the floor (v12.12; prior /15 scaling made score 4-6 = 26-40, unreachable).
-- M8 (fade): `edgeScore × 10` — only applies when `pFade->active`; otherwise falls through to `/15` scale.
+- M1/M2/M3 use `finalScore × 100 / 15` — needs score >= 6/15 to clear floor 40 (was 8/15 at floor 50).
+- M4/M6 use `score × 10` — score >= 4 clears the floor (was >= 5 at floor 50).
+- M8 (fade): `edgeScore × 10` — only applies when `pFade->active`; otherwise falls through to `/15` scale. Fade-edge fire threshold is already >= 4, so M8 is unchanged by the floor drop.
 
 ### M6 Entry Levels (balance-specific)
 
@@ -183,7 +183,7 @@ After an abnormally large bar (volume >= C_SPIKE_ATR_M × ATR-equivalent):
 |----------|-------|---------|
 | C_MIN_SCORE_M1 | 4 | Minimum raw score for M1 to arm |
 | C_MIN_SCORE_ALL | 3 | Minimum raw score for M2, M3, M4 to arm |
-| V18A_QUALITY_FLOOR | 50 | qScore100 must be >= 50 to submit |
+| V18A_QUALITY_FLOOR | **40** (v12.26) | qScore100 must be >= 40 to submit. Lowered from 50 on 2026-05-18 after NQM6 session showed M2 peak Q=46 / M4 peak Q=40 all near-missing the prior floor |
 
 ### MNQ vs NQ — point values
 
@@ -310,7 +310,7 @@ All of these must pass before an order is submitted:
 | Regime filter | Mode blocked by trend/chop/vol state | GATE CSV |
 | Auto-disable | Mode t-stat < -1.0 (n>=20) | SKIP log |
 | Post-stop cooldown | Same-direction entry within 10 bars of a stop-out | SKIP log |
-| Quality floor | `qScore100 < 50` | SKIP log |
+| Quality floor | `qScore100 < 40` (v12.26; was 50) | SKIP log |
 | M1 dead-zone | M1 entries 12:00–13:59 ET (v12.24) | Silent |
 | M1 trend gate | M1 LONG when 20-bar pc < -0.5×ATR; M1 SHORT when > +0.5×ATR (v12.24) | Silent |
 
@@ -508,6 +508,7 @@ CSV `Version` column reads `v12.25-py` to distinguish from live DLL output.
 | v12.23 | Live-readiness: M5 removed from selector. M1 enabled by default. C_MAX_LOSSES=2. Night session input slot 25 added. |
 | v12.24 | M7 (Auction Reversal) removed. M1 dead-zone 12:00–13:59 ET. M1 trend direction gate (20-bar pc vs ±0.5×ATR). Apex $150K eval profile baked into SetDefaults. EXTERNAL exit tag with broker-derived fill. CumPnL_AtEntry stale-snapshot guard. Dual broker/strategy day-P/L view. Marketable-limit entry default. Strategy-internal daily-loss cap. |
 | v12.25 | CtrlScore gate retrofit: M3 (strict), M6 (soft ±1), M8 (strict). M7 firing block removed (was wiping `PrevImbDir/Str/Extreme` and silently disabling M8 type 2). Broker-fill correction on STOP/TRAIL exits — `ExPx` now reflects actual fill when slippage > 0.5 tick. |
+| v12.26 | `V18A_QUALITY_FLOOR` 50 → 40 (live tuning). NQM6 2026-05-18 session produced only one passing signal (M4 BUY @ 28837.50); M2 peaked Q=46 / M4 peaked Q=40 / M1 peaked Q=40, all near-missing the prior floor. **Banner string still reads v12.25 — version label not bumped.** Test 1–2 live sessions on NQM6, then verify on a second contract before keeping. |
 
 ---
 
