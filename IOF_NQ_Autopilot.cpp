@@ -365,7 +365,9 @@ static const float C_T2_CEIL_PTS    = 125.0f;
 static const float C_RM_FLOOR       = 0.60f;
 
 // [v12.2] Quality floor lowered from 65. Required score 10/15 -> 8/15.
-static const int V18A_QUALITY_FLOOR = 50;
+// [v12.26] Floor 50->40: 2026-05-18 NQM6 session had M2 peak Q=46, M4 peak Q=40 — all near-misses.
+//          Test live for 1-2 sessions, then verify on a second contract before keeping.
+static const int V18A_QUALITY_FLOOR = 40;
 
 static const int LOG_CRIT = 0;
 static const int LOG_SIG  = 1;
