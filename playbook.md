@@ -1,7 +1,7 @@
 # IOF NQ Autopilot — Operator Playbook
 
 **Study:** IOF NQ — Pure Orderflow Autopilot
-**Version:** v12.25 (May 2026)
+**Version:** v12.27 (May 2026)
 **DLL:** `IOF_NQ_Autopilot_64.dll`
 **Platform:** Sierra Chart ACSIL
 **Instrument:** NQ (or MNQ) — 3000 contract volume bars, RTH only
@@ -16,7 +16,7 @@
 | 2 | Analysis → Build Custom Studies DLL (local) or remote build (single .cpp, no subfolders) |
 | 3 | Restart Sierra Chart if an old DLL was cached |
 | 4 | Open a **3000 contract volume** NQ chart with Bid/Ask volume enabled |
-| 5 | Add the study; confirm `SCDLLName = IOF_NQ_Autopilot` and load banner shows `v12.25` |
+| 5 | Add the study; confirm `SCDLLName = IOF_NQ_Autopilot` and load banner shows `v12.27` |
 | 6 | Set **Enable Auto Trading = 1** for trade sim / live orders |
 | 7 | Verify inputs (see Section 4) — daily caps, flatten time, CSV path |
 | 8 | Run `VERIFY_PRODUCTION_BUNDLE.ps1` to confirm DLL name consistency |
@@ -509,6 +509,7 @@ CSV `Version` column reads `v12.25-py` to distinguish from live DLL output.
 | v12.24 | M7 (Auction Reversal) removed. M1 dead-zone 12:00–13:59 ET. M1 trend direction gate (20-bar pc vs ±0.5×ATR). Apex $150K eval profile baked into SetDefaults. EXTERNAL exit tag with broker-derived fill. CumPnL_AtEntry stale-snapshot guard. Dual broker/strategy day-P/L view. Marketable-limit entry default. Strategy-internal daily-loss cap. |
 | v12.25 | CtrlScore gate retrofit: M3 (strict), M6 (soft ±1), M8 (strict). M7 firing block removed (was wiping `PrevImbDir/Str/Extreme` and silently disabling M8 type 2). Broker-fill correction on STOP/TRAIL exits — `ExPx` now reflects actual fill when slippage > 0.5 tick. |
 | v12.26 | `V18A_QUALITY_FLOOR` 50 → 40 (live tuning). NQM6 2026-05-18 session produced only one passing signal (M4 BUY @ 28837.50); M2 peaked Q=46 / M4 peaked Q=40 / M1 peaked Q=40, all near-missing the prior floor. **Banner string still reads v12.25 — version label not bumped.** Test 1–2 live sessions on NQM6, then verify on a second contract before keeping. |
+| v12.27 | `DayOpenPnL` re-snapshot on DLL load. Day-rollover snapshot at the start of session can capture 0 (Sierra/Rithmic position-sync lag) or be stale after a mid-session recompile, leaving `brokerDayPnL = CumPL − 0 + open` to falsely arm `DAILY_PROF` and block all entries. Observed 2026-05-19 NQM6: gate diag showed `brokerDayPnL=$1640` while broker Trade Account Monitor showed `DailyP/L=$0` and CSV had zero rows for the day. Fix: first flat bar after each DLL load snapshots `DayOpenPnL = pos.CumulativeProfitLoss`; emits `[V18A INIT] DayOpenPnL re-snapshot on load: …` confirming engage. Banner string updated to **v12.27**. |
 
 ---
 
