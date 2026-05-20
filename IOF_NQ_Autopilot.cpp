@@ -2,7 +2,7 @@
 //  IOF NQ — Pure Orderflow Autopilot
 //  Sierra Chart ACSIL Study
 //
-//  Version: v12.28 (May 2026; DayOpenPnL tracks broker CumPL until first entry)
+//  Version: v12.29 (May 2026; per-chart pre-entry latch + day-rollover latch reset)
 //
 //  CHANGES SINCE v11:
 //    [v12.1] RM floor 0.80 -> 0.60, Kelly cold-start 0.8 -> 0.9.
@@ -105,6 +105,20 @@
 //    [v12.22] M5 (Trap Reversal) mode restored. All modes active: M1–M8.
 //             Phase-3 trap progression and M5 signal block reinstated from v12.20
 //             state (reclaim-reset, phase-3 timeout, DL/DS-only entry, ctrl>=0 gate).
+//
+//    [v12.29] Per-chart pre-entry latch + day-rollover reset. v12.28 stored
+//             the "has entered this load" latch as a function-static, which is
+//             shared across every chart running this DLL in the same Sierra
+//             process. NQM6's first entry silently latched NQH6's pre-entry
+//             tracker, leaving NQH6's DayOpenPnL frozen at whatever it
+//             snapshotted at reload — the exact failure mode v12.27 and v12.28
+//             were trying to fix, just one chart later. Same code also never
+//             cleared the latch on day rollover, so day 2 onward relied on
+//             the single day-reset CumPL snapshot. Fix: latch is now a
+//             per-chart PersistInt (PI_HasEnteredThisLoad=92), and the day-
+//             reset block clears it. Also adds silent-skip diagnostics
+//             ([V18A SKIP] tag) on the pre-setup return paths to localize
+//             "no SETUP / no TRADE" sessions.
 //
 //    [v12.28] DayOpenPnL tracks broker CumPL until first entry. v12.27
 //             locked the baseline on the first flat bar after DLL load,
@@ -578,7 +592,7 @@ static void WriteCSV(SCStudyInterfaceRef& sc, const char* Evt, const char* Side,
               "%d,%d,%.0f,%.2f,"
               "%.2f,%s,%d,%.2f,%.2f,"
               "%.2f,%.2f,%d,%d,"
-              "%.2f,%d,%d,%d,v12.28,%llu\n",
+              "%.2f,%d,%d,%d,v12.29,%llu\n",
         Y,Mo,D,Hr,Mi,Se,Evt,Side,Mode,Entry,SL,TP1,TP2,Qty,Score,
         CtrlSc,DivStr,Delta,BarSpd,
         ExitPx,ExitR,Hold,MAE,MFE,
@@ -1246,6 +1260,7 @@ enum PersistInt {
     PI_LastExitWasLoss = 43,
     // 44–91: previously reserved for iof_v1_hooks.h ring (removed v12.26).
     // Slots remain unused to preserve PI numbering for any in-flight chartbooks.
+    PI_HasEnteredThisLoad = 92,   // [v12.29] per-chart latch for pre-entry DayOpenPnL tracking
 };
 
 enum PersistFloat {
@@ -1548,6 +1563,7 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
     int& LastSymbolHash = sc.GetPersistentInt(PI_LastSymbolHash);
     int& BannerShown    = sc.GetPersistentInt(PI_BannerShown);
     int& LastExitWasLoss = sc.GetPersistentInt(PI_LastExitWasLoss);
+    int& HasEnteredThisLoad = sc.GetPersistentInt(PI_HasEnteredThisLoad);  // [v12.29]
 
     float& EntryPx     = sc.GetPersistentFloat(PF_EntryPx);
     float& StopPx      = sc.GetPersistentFloat(PF_StopPx);
@@ -1637,7 +1653,7 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
     if(!BannerShown && DIAG) {
         InitRunID();
         SCString m;
-        m.Format("=== V18A v12.28 LOAD sym=%s tick=%.4f tickval=$%.2f Cap=$%.0f DailyLoss=$%.0f DailyProf=$%.0f "
+        m.Format("=== V18A v12.29 LOAD sym=%s tick=%.4f tickval=$%.2f Cap=$%.0f DailyLoss=$%.0f DailyProf=$%.0f "
                  "MaxTr=%d FlatT=%d Qty=%d Live=%d Regime=%d Fade=%d News=%d AutoDis=%d M1=%d "
                  "RM_FLOOR=%.2f QUAL_FLOOR=%d CD_trd=%d CD_loss=%d CD_stop=%d RunID=%llu ===",
             sc.Symbol.GetChars(), TICK, TICK_VAL, Capital, DAILY_LOSS, DAILY_PROF,
@@ -1658,26 +1674,37 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
     s_SCPositionData pos; sc.GetTradePosition(pos);
     int CurQ=pos.PositionQuantity;
 
-    // [v12.28] Pre-entry baseline tracking. Keep DayOpenPnL synced to broker
+    // [v12.29] Pre-entry baseline tracking. Keep DayOpenPnL synced to broker
     // CumPL on every flat bar UNTIL the strategy fires its first live entry
-    // of this load. Once LiveTradeDir transitions to non-zero, latch frozen
-    // so subsequent winning trades aren't zeroed out of brokerDayPnL.
+    // of the *current day*. Once LiveTradeDir transitions to non-zero, latch
+    // freezes so subsequent winning trades aren't zeroed out of brokerDayPnL.
     //
-    // Why: v12.27 locked the baseline on the first flat bar after DLL load,
-    // which captured CumPL=0 when Sierra/Rithmic hadn't synced position yet.
-    // Late-arriving carryover P&L (e.g. $1640 from a prior-day trade)
-    // then read as today's strategy P&L and armed DAILY_PROF
-    // (observed 2026-05-20 NQM6: DLL loaded 05:10 CumPL=0, broker pushed
-    // $1640 by 08:35, gate armed, zero entries all RTH).
+    // v12.29 changes from v12.28:
+    //   (a) Latch is now a per-chart PersistInt (PI_HasEnteredThisLoad), not a
+    //       DLL-wide function-static. v12.28's static was shared by every chart
+    //       running this study in the same Sierra process — NQM6's first entry
+    //       silently latched NQH6's pre-entry tracker, leaving NQH6's
+    //       DayOpenPnL frozen at whatever it held at reload.
+    //   (b) Latch is reset to 0 at every day-rollover (see DAY RESET block).
+    //       v12.28 only cleared the latch on DLL reload, so day-2 onward
+    //       relied entirely on the day-reset's single CumPL snapshot —
+    //       which is the very lag-prone read that v12.27 already proved
+    //       unreliable when Sierra/Rithmic sync is slow.
+    //
+    // Why the underlying mechanism exists: v12.27 locked the baseline on the
+    // first flat bar after DLL load, which captured CumPL=0 when Sierra/Rithmic
+    // hadn't synced position yet. Late-arriving carryover P&L (e.g. $1640 from
+    // a prior-day trade) then read as today's strategy P&L and armed DAILY_PROF
+    // (observed 2026-05-20 NQM6: DLL loaded 05:10 CumPL=0, broker pushed $1640
+    // by 08:35, gate armed, zero entries all RTH).
     //
     // Mid-trade reload caveat: if LiveTradeDir is non-zero on bar 1 from
     // persistent state, the latch flips immediately and we never re-snapshot.
     // DayOpenPnL retains its pre-reload persistent value, which is the best
     // we can do without knowing the true pre-trade baseline.
-    static bool s_HasEnteredThisLoad = false;
-    if(LiveTradeDir != 0) s_HasEnteredThisLoad = true;
+    if(LiveTradeDir != 0) HasEnteredThisLoad = 1;
 
-    if(!s_HasEnteredThisLoad && CurQ == 0){
+    if(!HasEnteredThisLoad && CurQ == 0){
         float prior = DayOpenPnL;
         DayOpenPnL = pos.CumulativeProfitLoss;
         if(LOG_LVL >= LOG_SIG && prior != DayOpenPnL){
@@ -1994,6 +2021,13 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
             LogError(sc, "LiveTradeDir non-zero at day rollover; forcing reset");
         }
         LiveTradeDir=0;
+        // [v12.29] Clear pre-entry latch so day N+1 re-syncs DayOpenPnL on
+        //          flat bars until the strategy's first entry of the new
+        //          day. Without this, the snapshot above is the only chance
+        //          to capture pos.CumulativeProfitLoss — which is exactly
+        //          the Sierra/Rithmic-lag scenario v12.27 already proved
+        //          unreliable.
+        HasEnteredThisLoad=0;
         ConsecLoss=0; LastExitWasLoss=0; LastSigBar=-1;
         LastM5Bar=-1; LastM5LogBar=-1;
         LastSkipLogBar=-1; LastBlockLogBar=-1;
