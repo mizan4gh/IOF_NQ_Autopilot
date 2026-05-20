@@ -2373,7 +2373,10 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
             }
             return;
         }
-        if(posQty!=0) return;
+        if(posQty!=0){
+            if(LOG_LVL>=LOG_SIG){ SCString sm; sm.Format("[V18A SKIP] posQty=%d (external position)", posQty); sc.AddMessageToLog(sm,0); }
+            return;
+        }
         if(Trades>=MAX_TRADES) {
             if(DIAG && LOG_LVL>=LOG_DBG && Idx!=LastSkipLogBar) {
                 LastSkipLogBar=Idx;
@@ -2381,12 +2384,21 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
             }
             return;
         }
-        if(Idx==LastExitBar) return;
+        if(Idx==LastExitBar){
+            if(LOG_LVL>=LOG_SIG){ SCString sm; sm.Format("[V18A SKIP] Idx==LastExitBar=%d", LastExitBar); sc.AddMessageToLog(sm,0); }
+            return;
+        }
         {
             // [v12.3] cooldowns halved (constants changed at top)
             const int cdBars = (LastExitWasLoss == 1) ? C_COOLDOWN_AFTER_LOSS : C_COOLDOWN_AFTER_TRADE;
-            if(cdBars>0&&EntryBar>=0&&Idx<=EntryBar+cdBars) return;
-            if(cdBars>0&&LastExitBar>=0&&Idx<=LastExitBar+cdBars) return;
+            if(cdBars>0&&EntryBar>=0&&Idx<=EntryBar+cdBars){
+                if(LOG_LVL>=LOG_SIG){ SCString sm; sm.Format("[V18A SKIP] post-entry cooldown EntryBar=%d cd=%d Idx=%d", EntryBar, cdBars, Idx); sc.AddMessageToLog(sm,0); }
+                return;
+            }
+            if(cdBars>0&&LastExitBar>=0&&Idx<=LastExitBar+cdBars){
+                if(LOG_LVL>=LOG_SIG){ SCString sm; sm.Format("[V18A SKIP] post-exit cooldown LastExitBar=%d cd=%d Idx=%d", LastExitBar, cdBars, Idx); sc.AddMessageToLog(sm,0); }
+                return;
+            }
         }
         if(C_MAX_LOSSES>0&&ConsecLoss>=C_MAX_LOSSES) {
             if(DIAG && LOG_LVL>=LOG_DBG && Idx!=LastSkipLogBar) {
@@ -2399,16 +2411,31 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
     }
 
     if(NEWS_FILTER&&pNews){
-        if(pNews->isNewsWindow(BarHHMM)) return;
-        if(pNews->spikeActive&&C_SPIKE_COOL>0&&Idx<=pNews->spikeBar+C_SPIKE_COOL) return;
-        if(pVCool&&pVCool->barsRemaining>0) return;
+        if(pNews->isNewsWindow(BarHHMM)){
+            if(LOG_LVL>=LOG_SIG){ SCString sm; sm.Format("[V18A SKIP] news window BarHHMM=%d", BarHHMM); sc.AddMessageToLog(sm,0); }
+            return;
+        }
+        if(pNews->spikeActive&&C_SPIKE_COOL>0&&Idx<=pNews->spikeBar+C_SPIKE_COOL){
+            if(LOG_LVL>=LOG_SIG){ SCString sm; sm.Format("[V18A SKIP] spike active spikeBar=%d cool=%d Idx=%d", pNews->spikeBar, C_SPIKE_COOL, Idx); sc.AddMessageToLog(sm,0); }
+            return;
+        }
+        if(pVCool&&pVCool->barsRemaining>0){
+            if(LOG_LVL>=LOG_SIG){ SCString sm; sm.Format("[V18A SKIP] vcool barsRemaining=%d", pVCool->barsRemaining); sc.AddMessageToLog(sm,0); }
+            return;
+        }
     }
 
-    if(iof_session::AtOrAfterFlatten(BarHHMM,FLAT_TIME)) return;
+    if(iof_session::AtOrAfterFlatten(BarHHMM,FLAT_TIME)){
+        if(LOG_LVL>=LOG_SIG){ SCString sm; sm.Format("[V18A SKIP] at/after flatten BarHHMM=%d FLAT=%d", BarHHMM, FLAT_TIME); sc.AddMessageToLog(sm,0); }
+        return;
+    }
     if(C_OPEN_COOL>0){
         int oM=(SESS_START/100)*60+(SESS_START%100);   // [v12.23] cooldown from session start
         int bM=(BarHHMM/100)*60+(BarHHMM%100);
-        if(bM<oM+C_OPEN_COOL) return;
+        if(bM<oM+C_OPEN_COOL){
+            if(LOG_LVL>=LOG_SIG){ SCString sm; sm.Format("[V18A SKIP] open cooldown bM=%d oM=%d cool=%d", bM, oM, C_OPEN_COOL); sc.AddMessageToLog(sm,0); }
+            return;
+        }
     }
     const bool vwapOK=(C_VWAP_MATURE<=0)||(VWAPBars>=C_VWAP_MATURE);
     const bool isNewBar=(Idx!=LastCalcBar);
@@ -2421,7 +2448,10 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
         else for(int k=0;k<C_DELTA_LB&&Idx>=k;k++) lbDelta+=sc.AskVolume[Idx-k]-sc.BidVolume[Idx-k];
     }
     const bool LBL=(lbDelta>0.f), LBS=(lbDelta<0.f);
-    if(!DL&&!DS&&!LBL&&!LBS) return;
+    if(!DL&&!DS&&!LBL&&!LBS){
+        if(LOG_LVL>=LOG_SIG){ SCString sm; sm.Format("[V18A SKIP] no delta direction Delta0=%.2f lbDelta=%.2f", Delta0, lbDelta); sc.AddMessageToLog(sm,0); }
+        return;
+    }
 
     float vwapSlope=0.f; bool sOKL=true, sOKS=true;
     if(C_VWAP_SLP_LB>0&&Idx>=C_VWAP_SLP_LB){
