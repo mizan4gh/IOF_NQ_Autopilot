@@ -10,6 +10,17 @@ IOF_NQ_edge_*.csv
 # Live trade journals (per-contract; appended to by the running strategy)
 IOF_NQ_NQ*.csv
 
+# Signal-quality model + predictions (offline ML research artifacts)
+IOF_NQ_signal_*.txt
+IOF_NQ_signal_*.csv
+
+# Manual trade journal (personal, not source of truth)
+manual_pnl.csv
+
+# Screenshots / images in the source tree
+*.PNG
+*.png
+
 # Python cache
 __pycache__/
 *.pyc
