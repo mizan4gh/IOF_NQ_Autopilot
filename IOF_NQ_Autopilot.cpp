@@ -2,7 +2,7 @@
 //  IOF NQ — Pure Orderflow Autopilot
 //  Sierra Chart ACSIL Study
 //
-//  Version: v12.30 (May 2026; revert V18A_QUALITY_FLOOR 40->50 after cross-contract A/B)
+//  Version: v12.31 (May 2026; vcool decrement per-bar + risk EMA hoisted to top-of-fn)
 //
 //  CHANGES SINCE v11:
 //    [v12.1] RM floor 0.80 -> 0.60, Kelly cold-start 0.8 -> 0.9.
@@ -105,6 +105,20 @@
 //    [v12.22] M5 (Trap Reversal) mode restored. All modes active: M1–M8.
 //             Phase-3 trap progression and M5 signal block reinstated from v12.20
 //             state (reclaim-reset, phase-3 timeout, DL/DS-only entry, ctrl>=0 gate).
+//
+//    [v12.31] Two correctness fixes from the deep audit.
+//             (a) Vcool decrement per-bar, not per-call. AutoLoop=1 calls the
+//                 study on every tick (~50-200 calls per 3000-vol bar); the
+//                 unconditional decrement at the top of TRADE_MGMT collapsed
+//                 C_VCOOL_PAUSE=40 to <1 bar in practice. Volatility cooldown
+//                 was effectively disabled. Gated by Idx != lastLogBar
+//                 (repurposed the previously-unused field on VolCooldownState).
+//             (b) pRisk->updateVolRegime + updateTimeDecay moved from deep
+//                 inside setup detection (called only on bars that pass all
+//                 gates) to the top of the function (every bar). The EMA on
+//                 ATR now samples regularly; volRegime classification stops
+//                 going stale on no-trade days. computeRiskMultiplier still
+//                 runs lazily right before the RM-floor check.
 //
 //    [v12.30] Revert V18A_QUALITY_FLOOR 40->50 after cross-contract A/B.
 //             Python backtest (2026-05-20) on NQZ25-CME.scid and NQM5.CME.scid
@@ -610,7 +624,7 @@ static void WriteCSV(SCStudyInterfaceRef& sc, const char* Evt, const char* Side,
               "%d,%d,%.0f,%.2f,"
               "%.2f,%s,%d,%.2f,%.2f,"
               "%.2f,%.2f,%d,%d,"
-              "%.2f,%d,%d,%d,v12.30,%llu\n",
+              "%.2f,%d,%d,%d,v12.31,%llu\n",
         Y,Mo,D,Hr,Mi,Se,Evt,Side,Mode,Entry,SL,TP1,TP2,Qty,Score,
         CtrlSc,DivStr,Delta,BarSpd,
         ExitPx,ExitR,Hold,MAE,MFE,
@@ -1671,7 +1685,7 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
     if(!BannerShown && DIAG) {
         InitRunID();
         SCString m;
-        m.Format("=== V18A v12.30 LOAD sym=%s tick=%.4f tickval=$%.2f Cap=$%.0f DailyLoss=$%.0f DailyProf=$%.0f "
+        m.Format("=== V18A v12.31 LOAD sym=%s tick=%.4f tickval=$%.2f Cap=$%.0f DailyLoss=$%.0f DailyProf=$%.0f "
                  "MaxTr=%d FlatT=%d Qty=%d Live=%d Regime=%d Fade=%d News=%d AutoDis=%d M1=%d "
                  "RM_FLOOR=%.2f QUAL_FLOOR=%d CD_trd=%d CD_loss=%d CD_stop=%d RunID=%llu ===",
             sc.Symbol.GetChars(), TICK, TICK_VAL, Capital, DAILY_LOSS, DAILY_PROF,
@@ -1688,6 +1702,18 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
 
     if(pAT&&barRange>0.f) pAT->update(sc.AskVolume[Idx],sc.BidVolume[Idx],barBody,barRange,Vol0);
     if(pVS&&barRange>0.f&&iof_session::AtOrAfterRthOpen(BarHHMM,RTH_OPEN)) pVS->update(barRange);
+
+    // [v12.31] Risk-state EMA updates were previously called only inside the
+    //          setup-detection path (around line ~3390). On bars where setup
+    //          detection silent-returns (cooldown, news, sessionDD, etc.),
+    //          the volRegime EMA went un-sampled — leading to jumpy/stale
+    //          regime classification. Moved here so the EMA tracks every bar.
+    //          updateVolRegime internally calls computeRiskMultiplier, so
+    //          riskMultiplier also stays fresh for the dashboard.
+    if(pRisk && ATR > 0.f){
+        pRisk->updateVolRegime(ATR);
+        pRisk->updateTimeDecay(Idx);
+    }
 
     s_SCPositionData pos; sc.GetTradePosition(pos);
     int CurQ=pos.PositionQuantity;
@@ -2233,7 +2259,17 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
             goto TRADE_MGMT;
         } else pNews->spikeActive=false;
         if(pVCool&&pVCool->barsRemaining>0){
-            pVCool->barsRemaining--;
+            // [v12.31] Decrement only on new bar. AutoLoop=1 calls this study
+            //          on every tick (~50-200 calls per 3000-vol bar); without
+            //          this gate, C_VCOOL_PAUSE=40 collapsed to <1 bar in
+            //          practice and the volatility cooldown was effectively
+            //          disabled. lastLogBar was declared in VolCooldownState
+            //          but previously unused — repurposed as last-decrement-
+            //          bar tracker. Safety net for spike events now intact.
+            if(Idx != pVCool->lastLogBar){
+                pVCool->lastLogBar = Idx;
+                pVCool->barsRemaining--;
+            }
             if(pVCool->barsRemaining>0) goto TRADE_MGMT;
         }
     }
@@ -3386,12 +3422,11 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
         }
     }
 
-    // Risk management update
-    if(pRisk){
-        pRisk->updateVolRegime(ATR);
-        pRisk->updateTimeDecay(Idx);
-        pRisk->computeRiskMultiplier();
-    }
+    // [v12.31] updateVolRegime / updateTimeDecay moved to the top of the
+    //          function so they sample every bar (not only bars that reach
+    //          this point). Keep computeRiskMultiplier here for freshness
+    //          right before the floor check below.
+    if(pRisk) pRisk->computeRiskMultiplier();
 
     // Risk multiplier floor ([v12.1] lowered to 0.60)
     if(pRisk && pRisk->riskMultiplier < C_RM_FLOOR){
