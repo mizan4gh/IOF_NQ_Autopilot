@@ -2,7 +2,7 @@
 //  IOF NQ — Pure Orderflow Autopilot
 //  Sierra Chart ACSIL Study
 //
-//  Version: v12.27 (May 2026; DayOpenPnL re-snapshot on DLL load)
+//  Version: v12.28 (May 2026; DayOpenPnL tracks broker CumPL until first entry)
 //
 //  CHANGES SINCE v11:
 //    [v12.1] RM floor 0.80 -> 0.60, Kelly cold-start 0.8 -> 0.9.
@@ -106,6 +106,22 @@
 //             Phase-3 trap progression and M5 signal block reinstated from v12.20
 //             state (reclaim-reset, phase-3 timeout, DL/DS-only entry, ctrl>=0 gate).
 //
+//    [v12.28] DayOpenPnL tracks broker CumPL until first entry. v12.27
+//             locked the baseline on the first flat bar after DLL load,
+//             but Sierra/Rithmic position sync can lag: CumPL=$0 at first
+//             bar then jumps to carryover value (e.g. $1640 from prior
+//             trade) minutes later. v12.27 captured the $0, then late
+//             carryover was counted as today's strategy P&L and armed
+//             DAILY_PROF (observed 2026-05-20 NQM6: DLL loaded 05:10
+//             with CumPL=0, broker pushed $1640 by 08:35, gate armed,
+//             zero entries all RTH). New rule: keep DayOpenPnL=CumPL on
+//             every pre-entry flat bar. Once LiveTradeDir transitions to
+//             non-zero (strategy entered), s_HasEnteredThisLoad latches,
+//             freezing the baseline so our own wins aren't zeroed. Mid-
+//             trade reloads: if LiveTradeDir is non-zero on bar 1 from
+//             persistent state, latch fires immediately and DayOpenPnL
+//             retains its persistent pre-reload value (best available).
+//
 //    [v12.27] DayOpenPnL re-snapshot on DLL load. Mid-session recompile (or a
 //             Sierra/Rithmic position-sync lag at first-bar-of-day) left
 //             DayOpenPnL=0 while pos.CumulativeProfitLoss carried yesterday's
@@ -117,6 +133,8 @@
 //             (s_LoadBaselineDone static-local at line ~1628). Gated on
 //             CurQ==0 so mid-trade reloads don't capture unrealized P&L.
 //             Emits [V18A INIT] log line confirming the re-snapshot.
+//             (Superseded by v12.28: one-shot lock was too eager when
+//             broker P&L arrived after first flat bar.)
 //
 //    [v12.26] V18A_QUALITY_FLOOR 50->40 + tick-snap M6/M7/M8 + daily-profit
 //             gate diag logging (commits 92316b5, 04e4e0b, 2e40016).
@@ -560,7 +578,7 @@ static void WriteCSV(SCStudyInterfaceRef& sc, const char* Evt, const char* Side,
               "%d,%d,%.0f,%.2f,"
               "%.2f,%s,%d,%.2f,%.2f,"
               "%.2f,%.2f,%d,%d,"
-              "%.2f,%d,%d,%d,v12.27,%llu\n",
+              "%.2f,%d,%d,%d,v12.28,%llu\n",
         Y,Mo,D,Hr,Mi,Se,Evt,Side,Mode,Entry,SL,TP1,TP2,Qty,Score,
         CtrlSc,DivStr,Delta,BarSpd,
         ExitPx,ExitR,Hold,MAE,MFE,
@@ -1619,7 +1637,7 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
     if(!BannerShown && DIAG) {
         InitRunID();
         SCString m;
-        m.Format("=== V18A v12.27 LOAD sym=%s tick=%.4f tickval=$%.2f Cap=$%.0f DailyLoss=$%.0f DailyProf=$%.0f "
+        m.Format("=== V18A v12.28 LOAD sym=%s tick=%.4f tickval=$%.2f Cap=$%.0f DailyLoss=$%.0f DailyProf=$%.0f "
                  "MaxTr=%d FlatT=%d Qty=%d Live=%d Regime=%d Fade=%d News=%d AutoDis=%d M1=%d "
                  "RM_FLOOR=%.2f QUAL_FLOOR=%d CD_trd=%d CD_loss=%d CD_stop=%d RunID=%llu ===",
             sc.Symbol.GetChars(), TICK, TICK_VAL, Capital, DAILY_LOSS, DAILY_PROF,
@@ -1640,21 +1658,30 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
     s_SCPositionData pos; sc.GetTradePosition(pos);
     int CurQ=pos.PositionQuantity;
 
-    // [v12.27] On first flat bar after DLL load, re-snapshot DayOpenPnL from
-    // broker cumulative. Day-rollover snapshot at line ~1886 only fires when
-    // BarDate != LastDay; that condition is false after a mid-session
-    // recompile, and pos.CumulativeProfitLoss may also have been stale
-    // (Sierra/Rithmic position sync lag) the moment the day-rollover block
-    // fired earlier. Either path leaves DayOpenPnL=0 while CumPL holds
-    // yesterday's manual-trade total, falsely arming the daily-profit cap.
-    // Gating on CurQ==0 avoids snapshotting mid-trade unrealized P&L.
-    static bool s_LoadBaselineDone = false;
-    if(!s_LoadBaselineDone && CurQ == 0){
+    // [v12.28] Pre-entry baseline tracking. Keep DayOpenPnL synced to broker
+    // CumPL on every flat bar UNTIL the strategy fires its first live entry
+    // of this load. Once LiveTradeDir transitions to non-zero, latch frozen
+    // so subsequent winning trades aren't zeroed out of brokerDayPnL.
+    //
+    // Why: v12.27 locked the baseline on the first flat bar after DLL load,
+    // which captured CumPL=0 when Sierra/Rithmic hadn't synced position yet.
+    // Late-arriving carryover P&L (e.g. $1640 from a prior-day trade)
+    // then read as today's strategy P&L and armed DAILY_PROF
+    // (observed 2026-05-20 NQM6: DLL loaded 05:10 CumPL=0, broker pushed
+    // $1640 by 08:35, gate armed, zero entries all RTH).
+    //
+    // Mid-trade reload caveat: if LiveTradeDir is non-zero on bar 1 from
+    // persistent state, the latch flips immediately and we never re-snapshot.
+    // DayOpenPnL retains its pre-reload persistent value, which is the best
+    // we can do without knowing the true pre-trade baseline.
+    static bool s_HasEnteredThisLoad = false;
+    if(LiveTradeDir != 0) s_HasEnteredThisLoad = true;
+
+    if(!s_HasEnteredThisLoad && CurQ == 0){
         float prior = DayOpenPnL;
         DayOpenPnL = pos.CumulativeProfitLoss;
-        s_LoadBaselineDone = true;
-        if(LOG_LVL >= LOG_SIG){
-            SCString g; g.Format("[V18A INIT] DayOpenPnL re-snapshot on load: "
+        if(LOG_LVL >= LOG_SIG && prior != DayOpenPnL){
+            SCString g; g.Format("[V18A INIT] DayOpenPnL re-snapshot (pre-entry): "
                                  "prior=%.2f new=%.2f (CumPL=%.2f)",
                                  prior, DayOpenPnL, pos.CumulativeProfitLoss);
             sc.AddMessageToLog(g, 0);
