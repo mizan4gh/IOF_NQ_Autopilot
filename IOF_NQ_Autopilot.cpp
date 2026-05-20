@@ -2,7 +2,7 @@
 //  IOF NQ — Pure Orderflow Autopilot
 //  Sierra Chart ACSIL Study
 //
-//  Version: v12.29 (May 2026; per-chart pre-entry latch + day-rollover latch reset)
+//  Version: v12.30 (May 2026; revert V18A_QUALITY_FLOOR 40->50 after cross-contract A/B)
 //
 //  CHANGES SINCE v11:
 //    [v12.1] RM floor 0.80 -> 0.60, Kelly cold-start 0.8 -> 0.9.
@@ -105,6 +105,17 @@
 //    [v12.22] M5 (Trap Reversal) mode restored. All modes active: M1–M8.
 //             Phase-3 trap progression and M5 signal block reinstated from v12.20
 //             state (reclaim-reset, phase-3 timeout, DL/DS-only entry, ctrl>=0 gate).
+//
+//    [v12.30] Revert V18A_QUALITY_FLOOR 40->50 after cross-contract A/B.
+//             Python backtest (2026-05-20) on NQZ25-CME.scid and NQM5.CME.scid
+//             with all-modes-at-QF=40 (the v12.26 setting): NQZ25 lost $2,955
+//             over ~6 months while NQM5 made $8,145 — same magnitude flip and
+//             same NQZ25-vs-NQM5 disagreement shape as the 738d5d5 revert.
+//             Per [[feedback-cross-contract-ab]], not shippable. Back to 50.
+//             M4 still shows positive edge at QF=40 on both contracts in
+//             isolation; a future per-mode floor (M4@40, others@50) is a
+//             plausible v12.31 candidate but needs a 3rd contract before
+//             shipping.
 //
 //    [v12.29] Per-chart pre-entry latch + day-rollover reset. v12.28 stored
 //             the "has entered this load" latch as a function-static, which is
@@ -411,10 +422,17 @@ static const float C_T2_CEIL_PTS    = 125.0f;
 // [v12.1] RM floor lowered from 0.80. Post-first-loss deadlock killer.
 static const float C_RM_FLOOR       = 0.60f;
 
-// [v12.2] Quality floor lowered from 65. Required score 10/15 -> 8/15.
+// [v12.2]  Quality floor lowered from 65. Required score 10/15 -> 8/15.
 // [v12.26] Floor 50->40: 2026-05-18 NQM6 session had M2 peak Q=46, M4 peak Q=40 — all near-misses.
 //          Test live for 1-2 sessions, then verify on a second contract before keeping.
-static const int V18A_QUALITY_FLOOR = 40;
+// [v12.30] REVERTED to 50. Cross-contract Python backtest (2026-05-20) on NQZ25
+//          and NQM5 showed QF=40 is contract-dependent edge-fitting, not a robust
+//          edge: NQZ25 -$2,955 vs NQM5 +$8,145 over ~6 months each. Same
+//          disagreement shape as the 738d5d5 revert. Per the cross-contract A/B
+//          rule, QF=40 cannot ship. M4 alone looks fine at floor 40 on both
+//          contracts — a future mode-specific floor (M4@40, others @50) is a
+//          plausible v12.31 candidate but needs a 3rd contract first.
+static const int V18A_QUALITY_FLOOR = 50;
 
 static const int LOG_CRIT = 0;
 static const int LOG_SIG  = 1;
@@ -592,7 +610,7 @@ static void WriteCSV(SCStudyInterfaceRef& sc, const char* Evt, const char* Side,
               "%d,%d,%.0f,%.2f,"
               "%.2f,%s,%d,%.2f,%.2f,"
               "%.2f,%.2f,%d,%d,"
-              "%.2f,%d,%d,%d,v12.29,%llu\n",
+              "%.2f,%d,%d,%d,v12.30,%llu\n",
         Y,Mo,D,Hr,Mi,Se,Evt,Side,Mode,Entry,SL,TP1,TP2,Qty,Score,
         CtrlSc,DivStr,Delta,BarSpd,
         ExitPx,ExitR,Hold,MAE,MFE,
@@ -1653,7 +1671,7 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
     if(!BannerShown && DIAG) {
         InitRunID();
         SCString m;
-        m.Format("=== V18A v12.29 LOAD sym=%s tick=%.4f tickval=$%.2f Cap=$%.0f DailyLoss=$%.0f DailyProf=$%.0f "
+        m.Format("=== V18A v12.30 LOAD sym=%s tick=%.4f tickval=$%.2f Cap=$%.0f DailyLoss=$%.0f DailyProf=$%.0f "
                  "MaxTr=%d FlatT=%d Qty=%d Live=%d Regime=%d Fade=%d News=%d AutoDis=%d M1=%d "
                  "RM_FLOOR=%.2f QUAL_FLOOR=%d CD_trd=%d CD_loss=%d CD_stop=%d RunID=%llu ===",
             sc.Symbol.GetChars(), TICK, TICK_VAL, Capital, DAILY_LOSS, DAILY_PROF,

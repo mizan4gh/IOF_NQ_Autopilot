@@ -100,8 +100,7 @@ C_STOP_FL    = 20.0;  C_STOP_CL = 40.0
 C_T1_FL      = 25.0;  C_T1_CL   = 50.0
 C_T2_FL      = 75.0;  C_T2_CL   = 125.0
 C_RM_FLOOR   = 0.60
-QUAL_FLOOR   = 50   # [v12.25 baseline; v12.26 cpp lowered to 40]
-QUAL_FLOOR_M4 = 40  # [test] M4 carries strategy at low floor (82% WR in NQZ25 qf40 run)
+QUAL_FLOOR   = 50   # [v12.30 cpp; v12.26 lowered to 40, reverted after cross-contract A/B]
 C_MIN_SC_M1  = 3
 C_MIN_SC_ALL = 3
 C_COOL_TRADE = 5
@@ -1203,7 +1202,6 @@ class Backtester:
         ts     = self._trend_str(i, atr)
         vr     = self._vol_reg(i, atr)
         if not self._regime_ok(sel, sl, tr, cr, ts): return
-        if sel == 0: return   # [test] M1 disabled — chronic loser even with v12.24 filters
         if sel == 0 and vr == 0: return   # M1: no trades in flat/low-ATR market
         if sel == 0 and 1200 <= bar.hhmm <= 1359: return  # M1: dead zone (0% WR 12-14h)
         if sel == 0:  # M1 directional trend gate: don't buy into downtrend / sell into uptrend
@@ -1234,8 +1232,7 @@ class Backtester:
         else:
             final_sc = sc_l if sl else sc_s
         q = qual100(sel, final_sc, fade_edge, fade_active)
-        floor = QUAL_FLOOR_M4 if sel == 3 else QUAL_FLOOR  # [test] per-mode floor
-        if q < floor: return
+        if q < QUAL_FLOOR: return
 
         # ── Enter trade ───────────────────────────────────────────────────────
         self._enter(i, bar, sel, sl, atr, final_sc, ctrl, div,
