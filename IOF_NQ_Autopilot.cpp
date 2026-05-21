@@ -1,3 +1,15 @@
+#include "sierrachart.h"
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <cfloat>
+#include <cstring>
+#include <ctime>
+
+// Sierra remote/local ACSIL: SCDLLName must appear near the top of the file (after sierrachart.h).
+// Kept here above the changelog banner so the remote build server's scan window always finds it.
+SCDLLName("IOF_NQ_Autopilot")
+
 // ============================================================================
 //  IOF NQ — Pure Orderflow Autopilot
 //  Sierra Chart ACSIL Study
@@ -281,17 +293,6 @@
 //  Headers iof_unified/* are pasted below so Sierra **remote** build (single .cpp upload)
 //  succeeds; edit the standalone copies under IOFv02/iof_unified/ then mirror changes here.
 // ============================================================================
-
-#include "sierrachart.h"
-#include <algorithm>
-#include <cmath>
-#include <cstdio>
-#include <cfloat>
-#include <cstring>
-#include <ctime>
-
-// Sierra remote/local ACSIL: SCDLLName must appear at the top of the file (after includes).
-SCDLLName("IOF_NQ_Autopilot")
 
 // ----- Inlined from iof_unified/iof_math.h (keep in sync with IOFv02/iof_unified/iof_math.h) -----
 namespace iof_unified {
