@@ -133,6 +133,16 @@ TICK         = 0.25
 PT_VAL       = 20.0          # NQ: $20/point ($5/tick)
 COMMISSION   = 5.0           # RT per trade
 
+# [v12.32-ab] Risk-model switch for the v12.31-vs-v12.32 cross-check.
+#   "v12_32_fixed" — per-bar EMA updates, time-decay follows the 50/200-bar curve.
+#   "v12_31_buggy" — emulates the cpp bug where AutoLoop=1 over-sampled the
+#                    EMAs ~50-200x/bar. Dominant effect: timeDecayFactor pins
+#                    to 0.5 within ~1 clock-bar after every trade; volRegime
+#                    EMA collapses (atrEMA = current ATR, no smoothing).
+#   "v12_32_no_rm_gate" — disable the RM<floor gate entirely (baseline behavior
+#                    of pre-port backtest.py for sanity-checking).
+RISK_MODEL   = "v12_32_fixed"
+
 MODE_NAMES = ["M1","M2","M3","M4","M5","M6","M7","M8"]
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -732,6 +742,121 @@ def qual100(sel_mode: int, final_sc: int, edge_sc: int, fade_active: bool) -> in
 #  RISK STATE
 # ─────────────────────────────────────────────────────────────────────────────
 @dataclass
+# ─────────────────────────────────────────────────────────────────────────────
+#  INSTITUTIONAL RISK STATE  (mirrors cpp lines 949-1206)
+# ─────────────────────────────────────────────────────────────────────────────
+#  Port of InstitutionalRiskState's RM-composition path. Only the fields that
+#  feed computeRiskMultiplier are tracked; live-only stuff (VaR, slippage EMA,
+#  realized-vol-target multiplier) is omitted. Multipliers we don't track in
+#  Python (equityCurveMultiplier, antiMartingaleMultiplier, budgetMultiplier)
+#  are pinned to 1.0 — the conservative assumption that maximizes RM, since
+#  this A/B is about whether the bug *blocks* SETUPs, not the absolute level.
+@dataclass
+class InstRisk:
+    # vol regime EMA
+    baseline_atr: float = 0.0
+    atr_ema:      float = 0.0
+    vol_regime:   int   = 1     # 0=low, 1=normal, 2=high, 3=extreme
+    # time decay
+    bars_since_last_trade: int   = 0
+    time_decay_factor:     float = 1.0
+    # composed multipliers (logged for diagnostics)
+    vol_multiplier:       float = 1.0
+    kelly_multiplier:     float = 0.9
+    drawdown_multiplier:  float = 1.0
+    recovery_multiplier:  float = 1.0
+    time_decay_mult:      float = 1.0
+    profit_multiplier:    float = 1.0
+    rm:                   float = 1.0
+
+    def update_vol_regime(self, atr: float):
+        if atr <= 0.0: return
+        if self.baseline_atr <= 0.0:
+            self.baseline_atr = atr; self.atr_ema = atr; self.vol_regime = 1
+            return
+        if RISK_MODEL == "v12_31_buggy":
+            # AutoLoop=1 collapses alpha=0.1 → ~1.0 after ~50 ticks. EMA tracks
+            # current bar's ATR with no smoothing; baselineATR drifts ~63%/bar
+            # instead of ~1%/bar (1 - 0.99^100 ≈ 0.63).
+            self.atr_ema = atr
+            self.baseline_atr += 0.63 * (self.atr_ema - self.baseline_atr)
+        else:
+            self.atr_ema = 0.1 * atr + 0.9 * self.atr_ema
+            self.baseline_atr += 0.01 * (self.atr_ema - self.baseline_atr)
+        ratio = self.atr_ema / self.baseline_atr if self.baseline_atr > 0 else 1.0
+        if   ratio < 0.7: self.vol_regime = 0
+        elif ratio < 1.3: self.vol_regime = 1
+        elif ratio < 2.0: self.vol_regime = 2
+        else:             self.vol_regime = 3
+
+    def update_time_decay(self):
+        if RISK_MODEL == "v12_31_buggy":
+            # AutoLoop=1: barsSinceLastTrade++ runs ~100x/bar. Within a single
+            # clock-bar after any trade, counter crosses 200 → factor pins 0.5.
+            # Approximation: any post-trade bar sees factor saturated to 0.5.
+            self.bars_since_last_trade += 1
+            self.time_decay_factor = 0.5 if self.bars_since_last_trade >= 1 else 1.0
+        else:
+            self.bars_since_last_trade += 1
+            n = self.bars_since_last_trade
+            if   n < 50:  self.time_decay_factor = 1.0
+            elif n > 200: self.time_decay_factor = 0.5
+            else:         self.time_decay_factor = 1.0 - (n - 50) / 150.0 * 0.5
+
+    def compute_rm(self, prac_kelly: float, cum_trades: int,
+                   sess_dd: float, in_recovery: bool,
+                   sess_pnl: float, sess_trades: int, consec_losses: int):
+        # volMultiplier
+        if   self.vol_regime == 0: self.vol_multiplier = 1.20
+        elif self.vol_regime == 1: self.vol_multiplier = 1.00
+        elif self.vol_regime == 2: self.vol_multiplier = 0.70
+        else:                      self.vol_multiplier = 0.40
+        # kellyMultiplier ([v12.1] cold-start 0.9)
+        if   cum_trades < 10:        self.kelly_multiplier = 0.90
+        elif prac_kelly <= 0.0:      self.kelly_multiplier = 0.25
+        elif prac_kelly >= 0.20:     self.kelly_multiplier = 1.25
+        elif prac_kelly >= 0.15:     self.kelly_multiplier = 1.10
+        elif prac_kelly >= 0.10:     self.kelly_multiplier = 1.00
+        else:                        self.kelly_multiplier = 0.75
+        # drawdownMultiplier
+        if   sess_dd <= 0:    self.drawdown_multiplier = 1.00
+        elif sess_dd < 500:   self.drawdown_multiplier = 0.95
+        elif sess_dd < 1000:  self.drawdown_multiplier = 0.80
+        elif sess_dd < 1500:  self.drawdown_multiplier = 0.60
+        elif sess_dd < 2000:  self.drawdown_multiplier = 0.40
+        else:                 self.drawdown_multiplier = 0.25
+        self.recovery_multiplier = 0.60 if in_recovery else 1.00
+        self.time_decay_mult     = self.time_decay_factor
+        # profitMultiplier (session-trade scaling)
+        self.profit_multiplier = 1.0
+        if sess_trades >= 3 and sess_pnl > 0:
+            if   sess_pnl >= 1500: self.profit_multiplier = 1.30
+            elif sess_pnl >= 1000: self.profit_multiplier = 1.20
+            elif sess_pnl >= 500:  self.profit_multiplier = 1.12
+            elif sess_pnl >= 250:  self.profit_multiplier = 1.06
+        # untracked multipliers pinned to 1.0 (see class docstring)
+        core      = (self.vol_multiplier ** 0.30) * (self.kelly_multiplier ** 0.25) * (self.drawdown_multiplier ** 0.25)
+        secondary = 1.0  # equityCurveMultiplier^0.10 * antiMartingaleMultiplier^0.10 → 1.0
+        modifiers = self.recovery_multiplier * self.time_decay_mult * 1.0 * self.profit_multiplier
+        rm = core * secondary * modifiers
+        rm = max(0.10, min(2.00, rm))
+        # consec-loss override
+        if   consec_losses >= 4: rm = min(rm, 0.25)
+        elif consec_losses >= 3: rm = min(rm, 0.50)
+        self.rm = rm
+
+    def on_trade_close(self):
+        self.bars_since_last_trade = 0
+        # In v12.32, factor returns to 1.0 immediately; the buggy version stays at 0.5
+        # until next bar (covered by update_time_decay).
+        self.time_decay_factor = 1.0
+
+    def on_day_reset(self):
+        self.bars_since_last_trade = 0
+        self.time_decay_factor     = 1.0
+
+
+@dataclass
 class Risk:
     wins:        int   = 0
     losses:      int   = 0
@@ -826,7 +951,9 @@ class Backtester:
         # Objects
         self.vp    = VP5Day()
         self.risk  = Risk()
+        self.inst_risk = InstRisk()  # [v12.32-ab] full RM model for the bug A/B
         self.trap  = Trap()
+        self.rm_gated = 0            # [v12.32-ab] count of SETUPs killed by RM<floor
 
         # Trade state
         self.in_pos     = False
@@ -901,6 +1028,7 @@ class Backtester:
               f"vcool_threshold_hits={self.dbg_vcool_trigger} | "
               f"bars_blocked spike={self.dbg_spike_blocked} vcool={self.dbg_vcool_blocked} | "
               f"peak_range_ratio={self.dbg_max_range_ratio:.2f}")
+        print(f"  [DIAG] risk_model={RISK_MODEL} setups_killed_by_RM_floor={self.rm_gated}")
 
         return self.out
 
@@ -920,7 +1048,23 @@ class Backtester:
             self.day_trades = 0
             self.day_done   = False
             self.risk.day_reset()
+            self.inst_risk.on_day_reset()  # [v12.32-ab] reset time-decay counter
             self.trap.reset()
+
+        # [v12.32-ab] Per-bar risk-EMA + time-decay updates (mirrors cpp 1714 hoisted block).
+        # Behavior diverges by RISK_MODEL: "v12_31_buggy" emulates the AutoLoop=1
+        # per-tick over-sampling; "v12_32_fixed" uses the intended per-bar cadence.
+        self.inst_risk.update_vol_regime(atr)
+        self.inst_risk.update_time_decay()
+        self.inst_risk.compute_rm(
+            prac_kelly    = self.risk.prac_kelly,
+            cum_trades    = self.risk.wins + self.risk.losses,
+            sess_dd       = self.risk.sess_dd,
+            in_recovery   = self.risk.in_recovery,
+            sess_pnl      = self.risk.sess_pnl,
+            sess_trades   = self.risk.wins + self.risk.losses,
+            consec_losses = self.risk.consec_loss,
+        )
 
         # ── RTH + flatten ────────────────────────────────────────────────────
         if bar.hhmm >= FLATTEN_HHMM:
@@ -1211,7 +1355,12 @@ class Backtester:
             if not sl and pc20 >  atr * 0.5: return  # SHORT into rising market
 
         # ── RM floor ─────────────────────────────────────────────────────────
-        if self.risk.rm < C_RM_FLOOR: return
+        # [v12.32-ab] Gate by full RM model (mirrors cpp line 3453). The legacy
+        # self.risk.rm is also clamped to >= C_RM_FLOOR so it never gates; use
+        # inst_risk.rm which can dip below the floor under the buggy model.
+        if self.inst_risk.rm < C_RM_FLOOR:
+            self.rm_gated += 1
+            return
 
         # ── Post-stop cooldown (direction-specific) ───────────────────────────
         if self.last_stop_bar >= 0 and i <= self.last_stop_bar + C_COOL_STOP:
@@ -1423,6 +1572,7 @@ class Backtester:
         if pnl < 0: self.last_loss_bar = i
         self.last_trade_bar = i
         self.risk.trade_done(pnl)
+        self.inst_risk.on_trade_close()  # [v12.32-ab] reset bars_since_last_trade
 
         # [v12.24] Emit a new EXIT trade via dataclasses.replace() rather than
         # mutating the SETUP record in place. The old code mutated cur_trade
@@ -1623,6 +1773,7 @@ def main():
     write_csv(trades, out)
     print_summary(trades)
     print(f"\nCSV written to: {out}")
+    return bt  # [v12.32-ab] expose Backtester for harness access to rm_gated / inst_risk
 
 
 if __name__ == "__main__":
