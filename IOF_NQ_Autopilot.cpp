@@ -14,7 +14,7 @@ SCDLLName("IOF_NQ_Autopilot")
 //  IOF NQ — Pure Orderflow Autopilot
 //  Sierra Chart ACSIL Study
 //
-//  Version: v12.31 (May 2026; vcool decrement per-bar + risk EMA hoisted to top-of-fn)
+//  Version: v12.32 (May 2026; per-bar gate on hoisted risk EMA — completes v12.31)
 //
 //  CHANGES SINCE v11:
 //    [v12.1] RM floor 0.80 -> 0.60, Kelly cold-start 0.8 -> 0.9.
@@ -117,6 +117,18 @@ SCDLLName("IOF_NQ_Autopilot")
 //    [v12.22] M5 (Trap Reversal) mode restored. All modes active: M1–M8.
 //             Phase-3 trap progression and M5 signal block reinstated from v12.20
 //             state (reclaim-reset, phase-3 timeout, DL/DS-only entry, ctrl>=0 gate).
+//
+//    [v12.32] Per-bar gate on the hoisted risk-EMA block — completes the
+//             v12.31(b) fix. sc.AutoLoop=1 calls the study ~50-200x per
+//             3000-vol bar; the v12.31 hoisted block had no per-bar gate.
+//             updateTimeDecay's barsSinceLastTrade++ inflated ~50-200x:
+//             timeDecayFactor (thresholds at 50/200 BARS) pinned to 0.5
+//             within ~1-2 clock-bars of every trade, halving riskMultiplier.
+//             updateVolRegime's alpha=0.1 EMA also collapsed to current-bar
+//             ATR (no smoothing) and baselineATR's 1% leak drifted ~63%/bar.
+//             Added int lastUpdateBar on InstitutionalRiskState (init -1)
+//             and gated the hoisted call by Idx != pRisk->lastUpdateBar,
+//             same pattern as the v12.31(a) vcool fix.
 //
 //    [v12.31] Two correctness fixes from the deep audit.
 //             (a) Vcool decrement per-bar, not per-call. AutoLoop=1 calls the
@@ -625,7 +637,7 @@ static void WriteCSV(SCStudyInterfaceRef& sc, const char* Evt, const char* Side,
               "%d,%d,%.0f,%.2f,"
               "%.2f,%s,%d,%.2f,%.2f,"
               "%.2f,%.2f,%d,%d,"
-              "%.2f,%d,%d,%d,v12.31,%llu\n",
+              "%.2f,%d,%d,%d,v12.32,%llu\n",
         Y,Mo,D,Hr,Mi,Se,Evt,Side,Mode,Entry,SL,TP1,TP2,Qty,Score,
         CtrlSc,DivStr,Delta,BarSpd,
         ExitPx,ExitR,Hold,MAE,MFE,
@@ -963,6 +975,7 @@ struct InstitutionalRiskState {
     float targetVolatility, realizedVolatility, volTargetMultiplier;
     float antiMartingaleLevel; int streakDirection, streakLength;
     int barsSinceLastTrade; float timeDecayFactor;
+    int lastUpdateBar; // [v12.32] per-bar gate for updateVolRegime/updateTimeDecay (AutoLoop=1 calls ~50-200x/bar)
     bool inRecoveryMode; float recoveryTarget, recoveryMultiplier;
     float dailyRiskBudget, riskBudgetUsed, riskBudgetRemaining;
     float riskMultiplier; bool profitScaleEnabled;
@@ -986,7 +999,7 @@ struct InstitutionalRiskState {
         optimalKelly=practicalKelly=0.f;
         targetVolatility=200.f; realizedVolatility=0.f; volTargetMultiplier=1.f;
         antiMartingaleLevel=1.f; streakDirection=0; streakLength=0;
-        barsSinceLastTrade=0; timeDecayFactor=1.f;
+        barsSinceLastTrade=0; timeDecayFactor=1.f; lastUpdateBar=-1;
         inRecoveryMode=false; recoveryTarget=0.f; recoveryMultiplier=1.f;
         dailyRiskBudget=2000.f; riskBudgetUsed=0.f; riskBudgetRemaining=2000.f;
         volMultiplier=kellyMultiplier=equityCurveMultiplier=antiMartingaleMultiplier=1.f;
@@ -1686,7 +1699,7 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
     if(!BannerShown && DIAG) {
         InitRunID();
         SCString m;
-        m.Format("=== V18A v12.31 LOAD sym=%s tick=%.4f tickval=$%.2f Cap=$%.0f DailyLoss=$%.0f DailyProf=$%.0f "
+        m.Format("=== V18A v12.32 LOAD sym=%s tick=%.4f tickval=$%.2f Cap=$%.0f DailyLoss=$%.0f DailyProf=$%.0f "
                  "MaxTr=%d FlatT=%d Qty=%d Live=%d Regime=%d Fade=%d News=%d AutoDis=%d M1=%d "
                  "RM_FLOOR=%.2f QUAL_FLOOR=%d CD_trd=%d CD_loss=%d CD_stop=%d RunID=%llu ===",
             sc.Symbol.GetChars(), TICK, TICK_VAL, Capital, DAILY_LOSS, DAILY_PROF,
@@ -1711,7 +1724,14 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
     //          regime classification. Moved here so the EMA tracks every bar.
     //          updateVolRegime internally calls computeRiskMultiplier, so
     //          riskMultiplier also stays fresh for the dashboard.
-    if(pRisk && ATR > 0.f){
+    // [v12.32] Gated by Idx != pRisk->lastUpdateBar. Without this gate
+    //          AutoLoop=1 caused updateTimeDecay's barsSinceLastTrade++ to
+    //          inflate ~50-200x per bar; timeDecayFactor pinned to 0.5 within
+    //          a couple of clock-bars after every trade. updateVolRegime's
+    //          alpha=0.1 EMA also collapsed to current-bar ATR (no smoothing)
+    //          and baselineATR drifted ~63%/bar instead of ~1%/bar.
+    if(pRisk && ATR > 0.f && Idx != pRisk->lastUpdateBar){
+        pRisk->lastUpdateBar = Idx;
         pRisk->updateVolRegime(ATR);
         pRisk->updateTimeDecay(Idx);
     }
