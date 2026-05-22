@@ -1360,6 +1360,11 @@ class Backtester:
         # inst_risk.rm which can dip below the floor under the buggy model.
         if self.inst_risk.rm < C_RM_FLOOR:
             self.rm_gated += 1
+            self._on_rm_gated(
+                i, sel, sl, atr, ctrl, div, sc_l, sc_s, bk_vs,
+                m6_sp, m6_t1, m6_t2,
+                fade_active, fade_edge, fade_type, fd_sp, fd_t1, fd_t2,
+            )
             return
 
         # ── Post-stop cooldown (direction-specific) ───────────────────────────
@@ -1491,6 +1496,13 @@ class Backtester:
         self.cur_trade = t
         self.out.append(t)
         self.day_trades += 1
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Hook fired when inst_risk.rm < C_RM_FLOOR kills a SETUP. Default is a
+    # no-op; rm_gated_audit.py overrides this to record the would-be setup and
+    # simulate its outcome. Args mirror the locals at the gate point.
+    def _on_rm_gated(self, *args, **kwargs):
+        pass
 
     # ──────────────────────────────────────────────────────────────────────────
     def _manage(self, i: int, bar: Bar, atr: float):
