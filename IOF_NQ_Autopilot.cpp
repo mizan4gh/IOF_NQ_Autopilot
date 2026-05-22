@@ -1404,6 +1404,7 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
     // modes on 3k volume bars). Gap is deliberate — keeps Input[25] addressable
     // from existing chartbook saves.
     SCInputRef IN_SESSION_START=sc.Input[25];  // [v12.23] 0=RTH only, 100=01:00 ET
+    SCInputRef IN_LOG_NOFIRE=sc.Input[26];     // [v12.35] per-bar mode-rejection diag
 
     if(sc.SetDefaults){
         sc.GraphName="IOF NQ Autopilot";
@@ -1512,6 +1513,7 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
         IN_M1_ENABLE.Name="Enable M1 VWAP Reclaim"; IN_M1_ENABLE.SetInt(1);   // [v12.23] default ON
         IN_M1_PULLBACK.Name="M1 Pullback Mode (0=off,1=wick,2=dip)"; IN_M1_PULLBACK.SetInt(2);  // [v12.34] default=2 dip+reclaim (cross-contract A/B passed 2026-05-22). 1=wick-reject (failed A/B).
         IN_SESSION_START.Name="Session Start HHMM (0=RTH 09:35, 100=01:00 ET)"; IN_SESSION_START.SetInt(0);  // [v12.24] RTH only — overnight session unvalidated
+        IN_LOG_NOFIRE.Name="Log mode-rejection reasons (0=off,1=on)"; IN_LOG_NOFIRE.SetInt(0);  // [v12.35] per-bar M2/M4/M6 NOFIRE diag — verbose, off by default
         return;
     }
 
@@ -1540,6 +1542,7 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
     const float DAILY_PROF=IN_DAILY_PROF.GetFloat();
     const int M1_ENABLE=IN_M1_ENABLE.GetInt();   // [v12.5]
     const int M1_PULLBACK=IN_M1_PULLBACK.GetInt(); // [v12.33]
+    const int LOG_NOFIRE=IN_LOG_NOFIRE.GetInt();   // [v12.35]
     if(TICK<=0.f)return;
 
     // Wilder ATR on chart OHLC (same units as price). Works on any bar type including
@@ -3185,6 +3188,68 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
     // [v12.25] M6 soft CtrlScore gate. Block only on clearly opposing control.
     if(m6L && controlScore < -1){ m6L=false; m6Stop=0.f; m6T1=0.f; m6T2=0.f; }
     if(m6S && controlScore >  1){ m6S=false; m6Stop=0.f; m6T1=0.f; m6T2=0.f; }
+
+    // ============================================================================
+    //  [v12.35] PER-BAR MODE-REJECTION DIAGNOSTIC (LOG_NOFIRE, sc.Input[26])
+    // ============================================================================
+    // Verbose per-bar log showing why each of M2/M4/M6 failed to arm on the
+    // current bar. Off by default. Use case: chart visually shows a setup,
+    // CSV has no SETUP row — toggle this on, reload, and the Message Log
+    // surfaces which gate killed each mode. Fires at most one line per bar,
+    // gated on "shape possibility" so noise stays low.
+    if(LOG_NOFIRE && !(m1L||m1S||m2L||m2S||m3L||m3S||m4L||m4S||m6L||m6S)){
+        // M4 near-miss: did a sweep actually happen this bar?
+        float swHi_dbg=0.f, swLo_dbg=0.f;
+        bool m4Possible=false;
+        if(C_SWEEP_LB>0 && Idx>=C_SWEEP_LB){
+            swHi_dbg=sc.High[Idx-1]; swLo_dbg=sc.Low[Idx-1];
+            for(int k=2;k<=C_SWEEP_LB&&Idx>=k;k++){
+                if(sc.Low[Idx-k]<swLo_dbg)  swLo_dbg=sc.Low[Idx-k];
+                if(sc.High[Idx-k]>swHi_dbg) swHi_dbg=sc.High[Idx-k];
+            }
+            m4Possible=(High0>swHi_dbg+TICK)||(Low0<swLo_dbg-TICK);
+        }
+        // M2 near-miss: at least one VP/ID level within ATR*0.75 of Close
+        bool m2Possible=false;
+        if(pVP&&pVP->valid&&ATR>0.f){
+            float vpZ=ATR*0.75f;
+            float lvs[8]; int nL=0;
+            lvs[nL++]=pVP->poc; lvs[nL++]=pVP->vah; lvs[nL++]=pVP->val;
+            if(pID&&pID->valid){
+                if(pID->prevHigh>0.f&&nL<8) lvs[nL++]=pID->prevHigh;
+                if(pID->prevLow >0.f&&nL<8) lvs[nL++]=pID->prevLow;
+                if(pID->prevClose>0.f&&nL<8) lvs[nL++]=pID->prevClose;
+            }
+            for(int i=0;i<nL;i++) if(lvs[i]>0.f&&FAbs(Close0-lvs[i])<=vpZ){m2Possible=true;break;}
+        }
+        // M6 near-miss: close beyond range edge by at least half the breakout threshold
+        bool m6Possible=false;
+        if(pBal&&ATR>0.f){
+            float bkT=ATR*0.30f;
+            m6Possible=(Close0>pBal->rangeHigh+bkT*0.5f)||(Close0<pBal->rangeLow-bkT*0.5f);
+        }
+        if(m2Possible||m4Possible||m6Possible){
+            SCString m;
+            m.Format(
+                "[V18A NOFIRE] Idx=%d Cls=%.2f VWAP=%.2f ATR=%.2f "
+                "bear=%d bull=%d DL=%d DS=%d LBL=%d LBS=%d ctrl=%d scL=%d scS=%d vwapOK=%d | "
+                "M2(poss=%d nLev~ok) | "
+                "M4(poss=%d swHi=%.2f swLo=%.2f) | "
+                "M6(poss=%d balMat=%d imbAct=%d imbDir=%d bkVerify=%d)",
+                Idx, Close0, VWAP, ATR,
+                (int)barBearish, (int)barBullish,
+                (int)DL, (int)DS, (int)LBL, (int)LBS,
+                controlScore, scL, scS, (int)vwapOK,
+                (int)m2Possible,
+                (int)m4Possible, swHi_dbg, swLo_dbg,
+                (int)m6Possible,
+                (int)(pBal && pBal->mature),
+                (int)(pImb && pImb->active),
+                pImb ? pImb->direction : 0,
+                bkVerifyScore);
+            sc.AddMessageToLog(m, 0);
+        }
+    }
 
     // ============================================================================
     //  M7 — AUCTION REVERSAL (R1-R8)
