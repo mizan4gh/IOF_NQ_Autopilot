@@ -143,6 +143,22 @@ COMMISSION   = 5.0           # RT per trade
 #                    of pre-port backtest.py for sanity-checking).
 RISK_MODEL   = "v12_32_fixed"
 
+# [v12.33/34] M1 pullback confirmation mode. Mirrors cpp sc.Input[16].
+#   0 = off (legacy two-bar continuation)
+#   1 = wick-reject gate (failed cross-contract A/B 2026-05-22 — kept for ref)
+#   2 = prior-bar dip + reclaim (default — cross-contract A/B passed 2026-05-22)
+M1_PULLBACK  = 2
+
+# STOP_MODEL — controls the per-trade stop-ceiling clamp.
+#   "fixed_ceiling"   — production cpp behavior. Stop = clamp(ATR*1.2, [20, 40]).
+#   "wide_for_hiconv" — high-conviction signals (score>=7 OR mode==M2) get a
+#                       wider ceiling: clamp(ATR*1.2, [20, 50]). T1/T2 ceilings
+#                       unchanged so this isolates the stop-ceiling variable.
+#                       Motivated by 2026-05-21 NQM6 M2 BUY stop-out: MAE=36.75
+#                       (under 40-pt stop by 3.25 pts), reversed to TP1.
+STOP_MODEL   = "fixed_ceiling"
+C_STOP_CL_HICONV = 50.0   # ceiling used when STOP_MODEL=="wide_for_hiconv" trigger fires
+
 MODE_NAMES = ["M1","M2","M3","M4","M5","M6","M7","M8"]
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -170,7 +186,8 @@ def detect_price_scale(path: str) -> float:
     name = os.path.basename(path).upper()
     # Dash-CME files (e.g. NQZ25-CME.scid, NQH26-CME.scid) use normal prices.
     # Non-dash files (e.g. NQZ5.CME.scid) store prices ×100.
-    if "-CME" in name:
+    # F.US.E* continuous-contract files (e.g. F.US.ENQM26.scid) use normal prices.
+    if "-CME" in name or name.startswith("F.US.E"):
         return 1.0
     return 100.0
 
@@ -1189,6 +1206,34 @@ class Backtester:
                     m1l = True
                 if bear and bar.close < vwap and prev_c < vwap and sc_s >= C_MIN_SC_M1 and ctrl <= 0 and s_ok_s and not m1l:
                     m1s = True
+        # [v12.33] mode=1: wick-reject gate. Failed cross-contract A/B 2026-05-22.
+        if M1_PULLBACK == 1 and vwap_ok:
+            if m1l:
+                pierced = bar.low <= vwap - TICK
+                wick_ge = (bar.open - bar.low) >= (bar.close - bar.open)
+                if not (pierced and wick_ge):
+                    m1l = False
+            if m1s:
+                pierced = bar.high >= vwap + TICK
+                wick_ge = (bar.high - bar.open) >= (bar.open - bar.close)
+                if not (pierced and wick_ge):
+                    m1s = False
+
+        # [v12.34] mode=2: prior-bar dip + reclaim. REPLACES legacy continuation.
+        # Prior bar touched VWAP and closed weak; current reclaims with body
+        # on trend side. Cross-contract A/B via backtest_v12_34_ab.py.
+        if M1_PULLBACK == 2 and vwap_ok and i >= 1 and atr > 0:
+            prev_bar = self.bars[i-1]
+            vw_z2 = atr * 0.75
+            tol = atr * 0.1
+            prev_dip_l = (prev_bar.low  <= vwap + vw_z2) and (prev_bar.close <= vwap + tol)
+            prev_dip_s = (prev_bar.high >= vwap - vw_z2) and (prev_bar.close >= vwap - tol)
+            recl_l = (bar.close > vwap) and bull and s_ok_l
+            rej_s  = (bar.close < vwap) and bear and s_ok_s
+            dip_l = prev_dip_l and recl_l and sc_l >= C_MIN_SC_M1 and ctrl >= 0
+            dip_s = prev_dip_s and rej_s  and sc_s >= C_MIN_SC_M1 and ctrl <= 0 and not dip_l
+            m1l = dip_l
+            m1s = dip_s
 
         # M2 — VP level test
         if vwap_ok and self.vp.valid and atr > 0:
@@ -1435,7 +1480,10 @@ class Backtester:
         elif sel == 7 and fade_active:
             sp, t1, t2 = fd_sp, fd_t1, fd_t2
         else:
-            sd = max(C_STOP_FL, min(C_STOP_CL, atr * C_STOP_ATR))
+            stop_cl = C_STOP_CL
+            if STOP_MODEL == "wide_for_hiconv" and (score >= 7 or sel == 1):
+                stop_cl = C_STOP_CL_HICONV
+            sd = max(C_STOP_FL, min(stop_cl, atr * C_STOP_ATR))
             t1 = max(C_T1_FL,   min(C_T1_CL,   atr * C_T1_ATR))
             t2 = max(C_T2_FL,   min(C_T2_CL,   atr * C_T2_ATR))
             if sl:

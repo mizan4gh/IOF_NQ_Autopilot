@@ -1,4 +1,9 @@
+#if defined(__has_include) && __has_include("sierrachart.h")
 #include "sierrachart.h"
+#else
+#include <cstdint>
+#define SCDLLName(name)
+#endif
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -1393,7 +1398,8 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
     SCInputRef IN_AUTO_DISABLE=sc.Input[13];
     SCInputRef IN_DAILY_PROF=sc.Input[14];
     SCInputRef IN_M1_ENABLE=sc.Input[15];   // [v12.5] toggle M1 on/off
-    // sc.Input[16..24] previously held the V1 hooks layer (removed v12.26 after
+    SCInputRef IN_M1_PULLBACK=sc.Input[16]; // [v12.33] M1 wick-reject pullback gate
+    // sc.Input[17..24] previously held the V1 hooks layer (removed v12.26 after
     // backtest showed legacy confirmation thresholds incompatible with v12.25
     // modes on 3k volume bars). Gap is deliberate — keeps Input[25] addressable
     // from existing chartbook saves.
@@ -1403,7 +1409,7 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
         sc.GraphName="IOF NQ Autopilot";
         sc.StudyDescription="IOF NQ Pure Orderflow (May 2026). "
             "v12.25: Active modes M1-M4,M6,M8 (M5+M7 removed). CtrlScore gates M3/M6/M8. "
-            "M1 ON with dead-zone(12-14h) + trend gate. News ON, $1000 daily loss cap, no profit cap. "
+            "M1 ON dip+reclaim default (v12.34) + dead-zone(12-14h) + trend gate. News ON, $1000 daily loss cap, no profit cap. "
             "RTH only (09:35 ET open, 15:55 flatten). Apex $150K eval Phase 1: 1 contract, 3 trades/day. "
             "3k (3000) vol bars. CSV IOF_NQ_*.csv.";
         sc.AutoLoop=1; sc.GraphRegion=0;
@@ -1504,6 +1510,7 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
         IN_AUTO_DISABLE.Name="Auto-disable bad modes (0=off)"; IN_AUTO_DISABLE.SetInt(1);
         IN_DAILY_PROF.Name="Daily Profit Target $ (0=disabled)"; IN_DAILY_PROF.SetFloat(1000.f);  // Apex eval: lock in +$1000 day, halt and flatten
         IN_M1_ENABLE.Name="Enable M1 VWAP Reclaim"; IN_M1_ENABLE.SetInt(1);   // [v12.23] default ON
+        IN_M1_PULLBACK.Name="M1 Pullback Mode (0=off,1=wick,2=dip)"; IN_M1_PULLBACK.SetInt(2);  // [v12.34] default=2 dip+reclaim (cross-contract A/B passed 2026-05-22). 1=wick-reject (failed A/B).
         IN_SESSION_START.Name="Session Start HHMM (0=RTH 09:35, 100=01:00 ET)"; IN_SESSION_START.SetInt(0);  // [v12.24] RTH only — overnight session unvalidated
         return;
     }
@@ -1532,6 +1539,7 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
     const int AUTO_DISABLE=IN_AUTO_DISABLE.GetInt();
     const float DAILY_PROF=IN_DAILY_PROF.GetFloat();
     const int M1_ENABLE=IN_M1_ENABLE.GetInt();   // [v12.5]
+    const int M1_PULLBACK=IN_M1_PULLBACK.GetInt(); // [v12.33]
     if(TICK<=0.f)return;
 
     // Wilder ATR on chart OHLC (same units as price). Works on any bar type including
@@ -2950,6 +2958,39 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
     // [v12.5] was hard-coded m1L=false;m1S=false. Now toggleable via input slot 15.
     // Default OFF matches manual (29% WR in backtest). Enable to A/B test.
     if(!M1_ENABLE){ m1L = false; m1S = false; }
+
+    // [v12.33] mode=1: wick-reject pullback gate. Tested 2026-05-22, both
+    // contracts AGREE fixed_worse — kept here for reference, not default.
+    if(M1_PULLBACK == 1){
+        if(m1L){
+            bool pierced = (Low0 <= VWAP - TICK);
+            bool wickGE  = ((Open0 - Low0) >= (Close0 - Open0));
+            if(!(pierced && wickGE)) m1L = false;
+        }
+        if(m1S){
+            bool pierced = (High0 >= VWAP + TICK);
+            bool wickGE  = ((High0 - Open0) >= (Open0 - Close0));
+            if(!(pierced && wickGE)) m1S = false;
+        }
+    }
+
+    // [v12.34] mode=2: prior-bar dip + reclaim. REPLACES legacy two-bar
+    // continuation trigger. Prior bar must have touched VWAP and closed at/
+    // near VWAP; current bar reclaims with bullish/bearish body. Cross-
+    // contract A/B via backtest_v12_34_ab.py before flipping live.
+    if(M1_ENABLE && M1_PULLBACK == 2 && vwapOK && Idx >= 1 && ATR > 0.f){
+        const float Low1  = sc.Low[Idx-1];
+        const float High1 = sc.High[Idx-1];
+        const float tol = ATR * 0.1f;
+        bool prevDipL = (Low1  <= VWAP + vwZ) && (Close1 <= VWAP + tol);
+        bool prevDipS = (High1 >= VWAP - vwZ) && (Close1 >= VWAP - tol);
+        bool reclL   = (Close0 > VWAP) && barBullish && sOKL;
+        bool rejS    = (Close0 < VWAP) && barBearish && sOKS;
+        bool dipL = prevDipL && reclL && (scL>=C_MIN_SCORE_M1) && (controlScore>=0);
+        bool dipS = prevDipS && rejS  && (scS>=C_MIN_SCORE_M1) && (controlScore<=0) && !dipL;
+        m1L = dipL;
+        m1S = dipS;
+    }
 
     // ============================================================================
     //  M2 — VP LEVEL TEST
