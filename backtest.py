@@ -149,6 +149,13 @@ RISK_MODEL   = "v12_32_fixed"
 #   2 = prior-bar dip + reclaim (default — cross-contract A/B passed 2026-05-22)
 M1_PULLBACK  = 2
 
+# [v12.35] Per-bar mode-rejection diagnostic. Mirrors cpp sc.Input[26].
+#   0 = off (default — zero behavioural effect)
+#   1 = collect a [V18A NOFIRE] record on bars where M1/M2/M3/M4/M6 all failed
+#       to arm AND at least one mode had a "shape possibility" (sweep / VP level
+#       in zone / close beyond balance edge). Diagnostic-only.
+LOG_NOFIRE   = 0
+
 # STOP_MODEL — controls the per-trade stop-ceiling clamp.
 #   "fixed_ceiling"   — production cpp behavior. Stop = clamp(ATR*1.2, [20, 40]).
 #   "wide_for_hiconv" — high-conviction signals (score>=7 OR mode==M2) get a
@@ -1007,6 +1014,14 @@ class Backtester:
         self.vcool_remaining = 0
         self.vcool_spike_bar = -1
 
+        # [v12.35] NOFIRE diagnostic + arm-vs-fire funnel
+        self.arm_long  = {m: 0 for m in range(8)}   # mode armed a LONG shape (pre-gates)
+        self.arm_short = {m: 0 for m in range(8)}   # mode armed a SHORT shape (pre-gates)
+        self.nofire = []                            # sample [V18A NOFIRE] lines
+        self.nofire_possible = {"M2": 0, "M4": 0, "M6": 0}
+        self.nofire_why = {}                        # near-miss block-reason tally
+        self.nofire_bars = 0                        # bars with a shape but no arm
+
         # Diagnostics
         self.dbg_range_spike   = 0   # range_spike condition fired
         self.dbg_delta_spike   = 0   # delta_spike condition fired
@@ -1369,6 +1384,69 @@ class Backtester:
             m8l = False; fade_active = False; fade_edge = 0; fade_type = 0
         if m8s and ctrl > 0:
             m8s = False; fade_active = False; fade_edge = 0; fade_type = 0
+
+        # ── [instrumentation] per-mode arm counts (before downstream gates) ────
+        for _mi, _ll, _ss in ((0, m1l, m1s), (1, m2l, m2s), (2, m3l, m3s),
+                              (3, m4l, m4s), (5, m6l, m6s), (7, m8l, m8s)):
+            if _ll: self.arm_long[_mi]  += 1
+            if _ss: self.arm_short[_mi] += 1
+
+        # ── [v12.35] LOG_NOFIRE — per-bar mode-rejection diagnostic ────────────
+        # Faithful port of the cpp v12.35 block (Autopilot.cpp:3193+). Fires when
+        # M1/M2/M3/M4/M6 all failed to arm AND ≥1 mode had a shape possibility.
+        if LOG_NOFIRE and not (m1l or m1s or m2l or m2s or m3l or m3s
+                               or m4l or m4s or m6l or m6s):
+            # M4 near-miss: did a sweep of the prior C_SWEEP_LB bars occur?
+            m4_poss = False; sw_hi_d = sw_lo_d = 0.0
+            if i >= C_SWEEP_LB:
+                sw_lo_d = min(self.bars[j].low  for j in range(i - C_SWEEP_LB, i))
+                sw_hi_d = max(self.bars[j].high for j in range(i - C_SWEEP_LB, i))
+                m4_poss = (bar.high > sw_hi_d + TICK) or (bar.low < sw_lo_d - TICK)
+            # M2 near-miss: a VP level within ATR*0.75 of close
+            m2_poss = False
+            if self.vp.valid and atr > 0:
+                vpz = atr * 0.75
+                for lv in (self.vp.poc, self.vp.vah, self.vp.val):
+                    if lv > 0 and abs(bar.close - lv) <= vpz:
+                        m2_poss = True; break
+            # M6 near-miss: close beyond a balance edge by half the breakout band
+            m6_poss = False
+            if bal.mature and atr > 0:
+                bkt = atr * 0.30
+                m6_poss = (bar.close > bal.hi + bkt * 0.5) or (bar.close < bal.lo - bkt * 0.5)
+
+            if m2_poss or m4_poss or m6_poss:
+                self.nofire_bars += 1
+                why = []
+                if m4_poss:
+                    self.nofire_possible["M4"] += 1
+                    m4_min = C_MIN_SC_ALL if abs(div.strength) >= 2 else C_MIN_SC_ALL + 1
+                    edge_ok = (vwap <= 0) or (abs(bar.close - vwap) >= atr * 0.35)
+                    if bar.low < sw_lo_d - TICK:        # would-be M4 LONG (sweep low → reclaim)
+                        if   not (bar.close > sw_lo_d): why.append("M4L:no_reclaim")
+                        elif not bull:                  why.append("M4L:not_bull")
+                        elif sc_l < m4_min:             why.append("M4L:scL_low")
+                        elif ctrl < 0:                  why.append("M4L:ctrl_neg")
+                        elif not edge_ok:               why.append("M4L:vwap_edge")
+                        else:                           why.append("M4L:other")
+                    if bar.high > sw_hi_d + TICK:       # would-be M4 SHORT (sweep high → reject)
+                        if   not (bar.close < sw_hi_d): why.append("M4S:no_reject")
+                        elif not bear:                  why.append("M4S:not_bear")
+                        elif sc_s < m4_min:             why.append("M4S:scS_low")
+                        elif ctrl > 0:                  why.append("M4S:ctrl_pos")
+                        elif not edge_ok:               why.append("M4S:vwap_edge")
+                        else:                           why.append("M4S:other")
+                if m6_poss: self.nofire_possible["M6"] += 1
+                if m2_poss: self.nofire_possible["M2"] += 1
+                for w in why:
+                    self.nofire_why[w] = self.nofire_why.get(w, 0) + 1
+                if len(self.nofire) < 40:
+                    self.nofire.append(
+                        f"[V18A NOFIRE] {bar.dt:%Y-%m-%d %H:%M} Cls={bar.close:.2f} "
+                        f"VWAP={vwap:.2f} ATR={atr:.2f} ctrl={ctrl} scL={sc_l} scS={sc_s} "
+                        f"vwapOK={int(vwap_ok)} | M2poss={int(m2_poss)} "
+                        f"M4poss={int(m4_poss)}(swHi={sw_hi_d:.2f} swLo={sw_lo_d:.2f}) "
+                        f"M6poss={int(m6_poss)} | why={','.join(why) or '-'}")
 
         # ── Priority: M6 > M8 (fade) > M4 > M3 > M2 > M1   [v12.24 — M5+M7 removed]
         sel = -1; sl = False

@@ -6,6 +6,7 @@ NQZ25-CME.*
 # Backtest / edge-discovery output CSVs (regenerated; not source of truth)
 IOF_NQ_backtest_*.csv
 IOF_NQ_edge_*.csv
+IOF_NQ_nofire_*.csv
 
 # Live trade journals (per-contract; appended to by the running strategy)
 IOF_NQ_NQ*.csv
