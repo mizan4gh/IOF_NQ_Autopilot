@@ -129,6 +129,14 @@ DAILY_PROF   = 0.0           # 0 = disabled
 NEWS_FILTER  = 0             # 0 = off
 ENTRY_ORD    = 2             # 0=mkt @ close, 1=lmt @ close (needs next-bar pullback), 2=lmt+2t (marketable)
 MAX_TRADES   = 6
+
+# Multi-contract TP1/TP2 scale-out (default OFF = single-lot, behaviour unchanged).
+# When SCALE_OUT and the sized qty >= 2: lot1 exits at TP1, the runner exits at
+# TP2 else trails after TP1; shared SL -> breakeven+buf once TP1 fills.
+SCALE_OUT    = False         # True = enable multi-lot scale-out
+BASE_QTY     = 1             # base contracts per entry
+SIZE_BY_RM   = False         # True = qty = max(1, round(BASE_QTY * risk_mult))
+DISABLE_MODES = set()        # mode indices (per MODE_NAMES) to suppress, e.g. {5}=M6
 TICK         = 0.25
 PT_VAL       = 20.0          # NQ: $20/point ($5/tick)
 COMMISSION   = 5.0           # RT per trade
@@ -1354,6 +1362,8 @@ class Backtester:
             m6l = False; m6_sp = m6_t1 = m6_t2 = 0.0
         if m6s and ctrl > 1:
             m6s = False; m6_sp = m6_t1 = m6_t2 = 0.0
+        if 5 in DISABLE_MODES:                      # suppress M6 entirely (top-priority)
+            m6l = m6s = False; m6_sp = m6_t1 = m6_t2 = 0.0
 
         # [v12.24] M7 (Auction Reversal) removed. The mode was dropped from
         # the priority chain and the detection block is now also stripped.
@@ -1593,6 +1603,9 @@ class Backtester:
         self.t1_bar    = -1
         self._mae      = 0.0
         self._mfe      = 0.0
+        self.qty       = self._lot_count()
+        self.lots_open = self.qty
+        self._realized = 0.0
 
         t = Trade(
             date       = bar.dt.strftime("%Y-%m-%d"),
@@ -1604,13 +1617,13 @@ class Backtester:
             sl         = round(sp, 2),
             tp1        = round(t1, 2),
             tp2        = round(t2, 2),
-            qty        = 1,
             score      = score,
             ctrl       = ctrl,
             div_str    = div.strength,
             delta      = float(bar.ask_vol - bar.bid_vol),
             bar_spd    = float(bar.volume),
             risk_mult  = round(self.risk.rm, 3),
+            qty        = self.qty,
             trend_reg  = tr,
             vol_reg    = vr,
             chop_reg   = cr,
@@ -1647,6 +1660,9 @@ class Backtester:
         max_risk = max(abs(self.entry_px - self.stop_px) * 3, atr * 3) * PT_VAL
         if op * PT_VAL < -max_risk:
             self._close(i, bar.close, "CB"); return
+
+        if SCALE_OUT and self.qty >= 2:
+            self._manage_scaled(i, bar, atr); return
 
         # T2 hit
         if not self.t1_hit:
@@ -1699,7 +1715,11 @@ class Backtester:
         if not self.in_pos or not self.cur_trade: return
         bar = self.bars[i]
         il  = self.is_long
-        pnl = ((ex_px - self.entry_px) if il else (self.entry_px - ex_px)) * PT_VAL - COMMISSION
+        # Close all remaining lots at ex_px; add any banked partials (_realized).
+        lots = getattr(self, "lots_open", 1) or 1
+        leg  = (((ex_px - self.entry_px) if il else (self.entry_px - ex_px)) * PT_VAL
+                - COMMISSION) * lots
+        pnl  = getattr(self, "_realized", 0.0) + leg
 
         self.day_pnl += pnl
         self.tot_pnl += pnl
@@ -1733,6 +1753,66 @@ class Backtester:
 
         self.in_pos = False; self.cur_trade = None
         self.t1_hit = False; self.t1_bar = -1
+        self.lots_open = 0; self._realized = 0.0
+
+    # ──────────────────────────────────────────────────────────────────────────
+    def _lot_count(self) -> int:
+        """Contracts for this entry (1 unless SCALE_OUT)."""
+        if not SCALE_OUT: return 1
+        if SIZE_BY_RM:    return max(1, int(round(BASE_QTY * self.risk.rm)))
+        return BASE_QTY
+
+    def _peel(self, px: float, lots: int):
+        """Book `lots` contracts at px into _realized; reduce lots_open."""
+        il  = self.is_long
+        pts = (px - self.entry_px) if il else (self.entry_px - px)
+        self._realized += pts * PT_VAL * lots - COMMISSION * lots
+        self.lots_open -= lots
+
+    def _manage_scaled(self, i: int, bar: Bar, atr: float):
+        """2-lot scale-out: lot1 -> TP1, runner -> TP2 else trail; shared SL ->
+        breakeven+buf after TP1. Engaged only when self.qty >= 2."""
+        il = self.is_long
+        if not self.t1_hit:
+            hitT1 = (il and bar.high >= self.tp1_px) or (not il and bar.low <= self.tp1_px)
+            hitT2 = (il and bar.high >= self.tp2_px) or (not il and bar.low <= self.tp2_px)
+            if hitT1 and hitT2:                  # bar blew through both
+                self._peel(self.tp1_px, 1)
+                self._close(i, self.tp2_px, "T2"); return
+            if hitT1:                            # peel lot1, run the rest
+                self._peel(self.tp1_px, 1)
+                self.t1_hit = True; self.t1_bar = i
+                buf = atr * C_BE_ATR
+                self.stop_px = (round((self.entry_px + buf) / TICK) * TICK if il
+                                else round((self.entry_px - buf) / TICK) * TICK)
+                return
+            if i > self.entry_bar + 3:           # stop before TP1 -> all lots out
+                sth = (il and bar.low <= self.stop_px + TICK) or \
+                      (not il and bar.high >= self.stop_px - TICK)
+                if sth: self._close(i, self.stop_px, "STOP"); return
+            return
+        # Runner (after TP1): TP2 hard, else trail (mirrors single-lot trail)
+        if (il and bar.high >= self.tp2_px) or (not il and bar.low <= self.tp2_px):
+            self._close(i, self.tp2_px, "T2"); return
+        delay = C_TRAIL_DLY * 3
+        if self.t1_bar >= 0 and i >= self.t1_bar + delay:
+            t1d = abs(self.tp1_px - self.entry_px)
+            cur = (bar.close - self.entry_px) if il else (self.entry_px - bar.close)
+            btr = C_TRAIL_ATR * 2.5 if (t1d > 0 and cur < t1d * 2) else C_TRAIL_ATR
+            td  = atr * btr
+            if t1d > 0 and cur > t1d * 2: td = min(td, atr * 0.75)
+            min_sp = round((self.entry_px + atr * 0.3) / TICK) * TICK if il \
+                     else round((self.entry_px - atr * 0.3) / TICK) * TICK
+            if il:
+                ns = round((bar.close - td) / TICK) * TICK
+                self.stop_px = max(max(self.stop_px, ns), min_sp)
+            else:
+                ns = round((bar.close + td) / TICK) * TICK
+                self.stop_px = min(min(self.stop_px, ns), min_sp)
+        if i > self.entry_bar + 3:
+            trail_hit = (il and bar.low <= self.stop_px + TICK) or \
+                        (not il and bar.high >= self.stop_px - TICK)
+            if trail_hit: self._close(i, self.stop_px, "TRAIL"); return
 
     # ──────────────────────────────────────────────────────────────────────────
     def _cool_ok(self, i: int) -> bool:

@@ -7,6 +7,8 @@ NQZ25-CME.*
 IOF_NQ_backtest_*.csv
 IOF_NQ_edge_*.csv
 IOF_NQ_nofire_*.csv
+IOF_NQ_sweep_*.csv
+IOF_NQ_prod_*.csv
 
 # Live trade journals (per-contract; appended to by the running strategy)
 IOF_NQ_NQ*.csv
