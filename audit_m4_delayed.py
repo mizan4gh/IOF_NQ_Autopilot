@@ -28,7 +28,7 @@ sys.argv = ["backtest.py", SCID, os.path.join(bt.BASE_DIR, "tmp_m4audit.csv")]
 b = bt.main()
 bars, PT = b.bars, bt.PT_VAL
 
-K, WIN = 8, 40            # retest must occur within K bars; evaluate over WIN
+K, WIN = 5, 40            # retest must occur within K bars; evaluate over WIN
 def lv(atr):
     return (max(bt.C_STOP_FL, min(bt.C_STOP_CL, atr * bt.C_STOP_ATR)),
             max(bt.C_T1_FL,   min(bt.C_T1_CL,   atr * bt.C_T1_ATR)))
