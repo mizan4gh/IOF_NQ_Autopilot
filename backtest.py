@@ -1296,7 +1296,7 @@ class Backtester:
             if m4_vwap_edge and bar.high > sw_hi + TICK and bar.close < sw_hi and bear and sc_s >= m4_min and ctrl <= 0:
                 m4s = True
             if (m4l or m4s):
-                self._on_m4_arm(i, bool(m4l), bar.close, atr)
+                self._on_m4_arm(i, bool(m4l), bar.close, atr, sw_lo if m4l else sw_hi)
             if 3 in DISABLE_MODES:                      # suppress M4 (sweep+reclaim)
                 m4l = m4s = False
 
@@ -1650,7 +1650,7 @@ class Backtester:
     # Hook fired whenever an M4 (sweep+reclaim) shape arms, BEFORE priority/gate
     # selection — so audits see every M4 signal, not just the rare ones that fire.
     # Default no-op; audit_m4_overshoot.py overrides to forward-simulate the path.
-    def _on_m4_arm(self, i: int, is_long: bool, ep: float, atr: float):
+    def _on_m4_arm(self, i: int, is_long: bool, ep: float, atr: float, sw: float = 0.0):
         pass
 
     # ──────────────────────────────────────────────────────────────────────────

@@ -18,7 +18,7 @@ import os, sys, statistics as st
 import backtest as bt
 
 arms = []
-bt.Backtester._on_m4_arm = lambda self, i, is_long, ep, atr: arms.append((i, is_long, ep, atr))
+bt.Backtester._on_m4_arm = lambda self, i, is_long, ep, atr, sw=0.0: arms.append((i, is_long, ep, atr))
 
 bt.TARGET_VOL = 3000          # production granularity (== default; no builder patch)
 SCID = sys.argv[1]
