@@ -10,14 +10,14 @@ import os, sys
 import backtest as bt
 
 # ── overrides ────────────────────────────────────────────────────────────────
-bt.DAILY_LOSS  = 1500.0   # was 0/800
+bt.DAILY_LOSS  = 2000.0   # was 0/800
 bt.DAILY_PROF  = 0.0      # no daily profit cap
 bt.NEWS_FILTER = 0        # news filter off
 bt.C_OPEN_COOL = 10       # was 36
 bt.TARGET_VOL  = 5000     # was 3000 (also force the builder below)
 bt.SCALE_OUT   = True     # multi-lot TP1/TP2 scale-out
 bt.BASE_QTY    = 2        # 2 lots: 1@TP1, runner@TP2-else-trail
-bt.SIZE_BY_RM  = True     # qty = max(1, round(2 * risk_mult))
+bt.SIZE_BY_RM  = False    # fixed BASE_QTY (=2 contracts min, RM-sizing off)
 _dm = os.environ.get("DISABLE_MODES", "").strip()
 if _dm:
     bt.DISABLE_MODES = {int(x) for x in _dm.replace(" ", "").split(",") if x}

@@ -1295,6 +1295,10 @@ class Backtester:
                 m4l = True
             if m4_vwap_edge and bar.high > sw_hi + TICK and bar.close < sw_hi and bear and sc_s >= m4_min and ctrl <= 0:
                 m4s = True
+            if (m4l or m4s):
+                self._on_m4_arm(i, bool(m4l), bar.close, atr)
+            if 3 in DISABLE_MODES:                      # suppress M4 (sweep+reclaim)
+                m4l = m4s = False
 
         # [v12.24] M5 (Trap Reversal) removed. Was already pruned from the
         # priority chain in v12.21; detection code is now removed too.
@@ -1641,6 +1645,12 @@ class Backtester:
     # no-op; rm_gated_audit.py overrides this to record the would-be setup and
     # simulate its outcome. Args mirror the locals at the gate point.
     def _on_rm_gated(self, *args, **kwargs):
+        pass
+
+    # Hook fired whenever an M4 (sweep+reclaim) shape arms, BEFORE priority/gate
+    # selection — so audits see every M4 signal, not just the rare ones that fire.
+    # Default no-op; audit_m4_overshoot.py overrides to forward-simulate the path.
+    def _on_m4_arm(self, i: int, is_long: bool, ep: float, atr: float):
         pass
 
     # ──────────────────────────────────────────────────────────────────────────
