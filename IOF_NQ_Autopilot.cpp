@@ -19,7 +19,7 @@ SCDLLName("IOF_NQ_Autopilot")
 //  IOF NQ — Pure Orderflow Autopilot
 //  Sierra Chart ACSIL Study
 //
-//  Version: v12.32 (May 2026; per-bar gate on hoisted risk EMA — completes v12.31)
+//  Version: v12.36 (May 2026; late-entry gate: skip new SETUPs at BarHHMM >= 1500)
 //
 //  CHANGES SINCE v11:
 //    [v12.1] RM floor 0.80 -> 0.60, Kelly cold-start 0.8 -> 0.9.
@@ -122,6 +122,16 @@ SCDLLName("IOF_NQ_Autopilot")
 //    [v12.22] M5 (Trap Reversal) mode restored. All modes active: M1–M8.
 //             Phase-3 trap progression and M5 signal block reinstated from v12.20
 //             state (reclaim-reset, phase-3 timeout, DL/DS-only entry, ctrl>=0 gate).
+//
+//    [v12.36] Late-entry gate. Skip new SETUPs at BarHHMM >= 1500. Cross-
+//             contract A/B (NQZ25 + NQM5) on 2026-05-28: NQZ25 +$395 (vetoed
+//             one losing late M4), NQM5 $0 (no late trades). Backed by 3-
+//             contract walk-forward over 267 candidates (+$12,370 lift),
+//             extracted as the only ML-derived hand-rule that survived
+//             expanding-month forward holdout (see project_r2b_late_entry_skip
+//             memory). Mechanism: ≤55 min before FLAT_TIME=1555 is too little
+//             runway for reversal modes (M2/M4) to reach T2/trail. Trade
+//             management still runs above the gate for in-flight positions.
 //
 //    [v12.32] Per-bar gate on the hoisted risk-EMA block — completes the
 //             v12.31(b) fix. sc.AutoLoop=1 calls the study ~50-200x per
@@ -422,7 +432,7 @@ static const int   C_COOLDOWN_AFTER_LOSS  = 10;
 static const int   C_POST_STOP_COOLDOWN   = 10;
 
 static const int   C_DELTA_LB       = 15;
-static const int   C_OPEN_COOL      = 36;
+static const int   C_OPEN_COOL      = 10;
 static const int   C_VWAP_MATURE    = 40;
 static const int   C_STRUCT_LB      = 25;
 static const float C_STRUCT_MAX     = 1.5f;
@@ -642,7 +652,7 @@ static void WriteCSV(SCStudyInterfaceRef& sc, const char* Evt, const char* Side,
               "%d,%d,%.0f,%.2f,"
               "%.2f,%s,%d,%.2f,%.2f,"
               "%.2f,%.2f,%d,%d,"
-              "%.2f,%d,%d,%d,v12.32,%llu\n",
+              "%.2f,%d,%d,%d,v12.36,%llu\n",
         Y,Mo,D,Hr,Mi,Se,Evt,Side,Mode,Entry,SL,TP1,TP2,Qty,Score,
         CtrlSc,DivStr,Delta,BarSpd,
         ExitPx,ExitR,Hold,MAE,MFE,
@@ -1710,7 +1720,7 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
     if(!BannerShown && DIAG) {
         InitRunID();
         SCString m;
-        m.Format("=== V18A v12.32 LOAD sym=%s tick=%.4f tickval=$%.2f Cap=$%.0f DailyLoss=$%.0f DailyProf=$%.0f "
+        m.Format("=== V18A v12.36 LOAD sym=%s tick=%.4f tickval=$%.2f Cap=$%.0f DailyLoss=$%.0f DailyProf=$%.0f "
                  "MaxTr=%d FlatT=%d Qty=%d Live=%d Regime=%d Fade=%d News=%d AutoDis=%d M1=%d "
                  "RM_FLOOR=%.2f QUAL_FLOOR=%d CD_trd=%d CD_loss=%d CD_stop=%d RunID=%llu ===",
             sc.Symbol.GetChars(), TICK, TICK_VAL, Capital, DAILY_LOSS, DAILY_PROF,
@@ -2547,6 +2557,13 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
 
     if(iof_session::AtOrAfterFlatten(BarHHMM,FLAT_TIME)){
         if(LOG_LVL>=LOG_SIG){ SCString sm; sm.Format("[V18A SKIP] at/after flatten BarHHMM=%d FLAT=%d", BarHHMM, FLAT_TIME); sc.AddMessageToLog(sm,0); }
+        return;
+    }
+    // [v12.36] Late-entry gate. Skip new SETUPs at BarHHMM >= 1500. Reversal
+    // modes (M2/M4) need >55 min before flatten to reach T2/trail; trades that
+    // fire in 1500-1555 get cut short and become net losers cross-contract.
+    if(BarHHMM >= 1500){
+        if(LOG_LVL>=LOG_SIG){ SCString sm; sm.Format("[V18A SKIP] late-entry gate BarHHMM=%d (>=1500)", BarHHMM); sc.AddMessageToLog(sm,0); }
         return;
     }
     if(C_OPEN_COOL>0){

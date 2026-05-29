@@ -87,6 +87,11 @@ SCID_DTYPE = np.dtype([
 TARGET_VOL   = 3000          # contracts per bar
 RTH_OPEN     = 935           # 09:35 ET — RTH only
 FLATTEN_HHMM = 1555          # 15:55 ET
+# [v12.36-ab candidate] Skip new SETUPs at/after this HHMM. Default = FLATTEN_HHMM
+# (off — only blocks the bar where flatten itself runs). Set to 1500 to test the
+# R2b late-entry rule from [[project_r2b_late_entry_skip]]: ≤55 min before flatten
+# is too little runway for reversal modes to reach T2/trail.
+LATE_ENTRY_GATE = FLATTEN_HHMM
 
 ATR_PER      = 14
 C_STOP_ATR   = 1.2
@@ -247,11 +252,16 @@ def build_volume_bars(recs: np.ndarray, target_vol: int = TARGET_VOL,
         dt_utc = SC_EPOCH_UTC + timedelta(microseconds=sc_us)
         dt    = dt_utc.astimezone(ET)          # local ET (handles DST)
         rc    = float(rec["close"])  / price_scale
-        rh    = float(rec["high"])   / price_scale
-        rl    = float(rec["low"])    / price_scale
-        ro_raw = float(rec["open"]) / price_scale
-        # For ask-side ticks open is 0 or non-finite; use close as bar open instead
-        ro    = rc if (not math.isfinite(ro_raw) or ro_raw == 0.0) else ro_raw
+        rh_raw = float(rec["high"])  / price_scale
+        rl_raw = float(rec["low"])   / price_scale
+        ro_raw = float(rec["open"])  / price_scale
+        # Sierra emits 0 / non-finite for OHL on ask-side single-tick records.
+        # Fall back to close so the bar's running OHLC stays valid. Without the
+        # low fallback, l=min(l,0)=0 corrupts TR/ATR for the whole session and
+        # propagates forward through Wilder's 14-bar EMA (NQH6 bug, 2026-05-28).
+        ro = rc if (not math.isfinite(ro_raw) or ro_raw == 0.0) else ro_raw
+        rh = rc if (not math.isfinite(rh_raw) or rh_raw == 0.0) else rh_raw
+        rl = rc if (not math.isfinite(rl_raw) or rl_raw == 0.0) else rl_raw
         bv, av = int(rec["bid_vol"]), int(rec["ask_vol"])
 
         if first_dt is None:
@@ -1132,6 +1142,9 @@ class Backtester:
             return
 
         # ── Entry gates ──────────────────────────────────────────────────────
+        # [v12.36-ab] Late-entry gate — blocks new SETUPs after LATE_ENTRY_GATE.
+        # Trade management above this point still runs for in-flight positions.
+        if bar.hhmm >= LATE_ENTRY_GATE:                                  return
         if NEWS_FILTER and is_news_window(bar.hhmm):                     return
 
         # Volume-spike detection + cooldown (mirrors Autopilot.cpp:2092-2120).
@@ -1405,6 +1418,23 @@ class Backtester:
             if _ll: self.arm_long[_mi]  += 1
             if _ss: self.arm_short[_mi] += 1
 
+        # ── [candidate-fire labeler hook] called whenever ANY mode arms, BEFORE
+        # the priority cascade or any downstream gate (regime, RM, cool, qual).
+        # Default no-op; xgb_candidate_label.py overrides to capture every armed
+        # (mode, side) and forward-simulate its outcome. Passes a dict so the
+        # signature stays stable as new features are added.
+        if any((m1l, m1s, m2l, m2s, m3l, m3s, m4l, m4s, m6l, m6s, m8l, m8s)):
+            self._on_any_arm(i, dict(
+                bar=bar, atr=atr, vwap=vwap, ctrl=ctrl,
+                sc_l=sc_l, sc_s=sc_s, div_strength=div.strength,
+                m1l=m1l, m1s=m1s, m2l=m2l, m2s=m2s, m3l=m3l, m3s=m3s,
+                m4l=m4l, m4s=m4s, m6l=m6l, m6s=m6s, m8l=m8l, m8s=m8s,
+                m6_sp=m6_sp, m6_t1=m6_t1, m6_t2=m6_t2,
+                fade_active=fade_active, fade_edge=fade_edge,
+                fade_type=fade_type, fd_sp=fd_sp, fd_t1=fd_t1, fd_t2=fd_t2,
+                bk_vs=bk_vs,
+            ))
+
         # ── [v12.35] LOG_NOFIRE — per-bar mode-rejection diagnostic ────────────
         # Faithful port of the cpp v12.35 block (Autopilot.cpp:3193+). Fires when
         # M1/M2/M3/M4/M6 all failed to arm AND ≥1 mode had a shape possibility.
@@ -1651,6 +1681,13 @@ class Backtester:
     # selection — so audits see every M4 signal, not just the rare ones that fire.
     # Default no-op; audit_m4_overshoot.py overrides to forward-simulate the path.
     def _on_m4_arm(self, i: int, is_long: bool, ep: float, atr: float, sw: float = 0.0):
+        pass
+
+    # Hook fired whenever ANY mode arms (M1/M2/M3/M4/M6/M8), before priority
+    # cascade and downstream gates. ctx is a dict of at-bar features + per-mode
+    # arm flags. Default no-op; xgb_candidate_label.py overrides to label every
+    # armed candidate's forward outcome for ML training.
+    def _on_any_arm(self, i: int, ctx: dict):
         pass
 
     # ──────────────────────────────────────────────────────────────────────────
