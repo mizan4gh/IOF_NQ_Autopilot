@@ -24,6 +24,7 @@ SC_DATA = Path(r"C:\SierraChart\Data")
 CONTRACTS = {
     "NQZ25": BASE / "NQZ25-CME.scid",
     "NQM5":  SC_DATA / "NQM5.CME.scid",
+    "NQH6":  SC_DATA / "NQH6.CME.scid",  # genuine Mar-2026 per project_nqh26_duplicate_data
 }
 
 _APEX = dict(
@@ -130,13 +131,13 @@ def main():
         print(f"   {tag:8s} delta = ${deltas[tag]:+,.0f}  "
               f"(baseline ${base:+,.0f} -> gate ${gate:+,.0f})")
     if all(d > 0 for d in deltas.values()):
-        print("\n  ★ AGREE fixed_better — safe to add `if (bar.HHMM >= 1500) return;` in cpp v12.36")
+        print("\n  AGREE fixed_better -- safe to add `if (bar.HHMM >= 1500) return;` in cpp v12.36")
     elif all(d >= 0 for d in deltas.values()):
-        print("\n  ✓ AGREE neutral-or-better — rule does no harm. Ship if mechanism is sound.")
+        print("\n  AGREE neutral-or-better -- rule does no harm. Ship if mechanism is sound.")
     elif all(d < 0 for d in deltas.values()):
-        print("\n  ✗ AGREE fixed_worse — DO NOT ship.")
+        print("\n  AGREE fixed_worse -- DO NOT ship.")
     else:
-        print("\n  ✗ DISAGREE — do not ship per [[feedback_cross_contract_ab]].")
+        print("\n  DISAGREE -- do not ship per [[feedback_cross_contract_ab]].")
 
 
 if __name__ == "__main__":
