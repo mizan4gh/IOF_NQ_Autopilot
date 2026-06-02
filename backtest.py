@@ -132,6 +132,10 @@ C_VWAP_SLP_TOL  = 0.02 # [v12.22] M1 VWAP slope tolerance as ATR fraction (tight
 DAILY_LOSS   = 0.0           # 0 = disabled
 DAILY_PROF   = 0.0           # 0 = disabled
 NEWS_FILTER  = 0             # 0 = off
+# [news-override-ab] If True AND NEWS_FILTER on: allow M4 "clean reclaim" shapes through
+# the news blackout (M4-only, close past sweep ≥ 2 ticks, sc ≥ 4 — no div-3 fallback).
+# All other modes remain blocked during news. Default off — flag-gated for A/B harness.
+NEWS_OVERRIDE_M4_RECLAIM = False
 ENTRY_ORD    = 2             # 0=mkt @ close, 1=lmt @ close (needs next-bar pullback), 2=lmt+2t (marketable)
 MAX_TRADES   = 6
 
@@ -1145,7 +1149,8 @@ class Backtester:
         # [v12.36-ab] Late-entry gate — blocks new SETUPs after LATE_ENTRY_GATE.
         # Trade management above this point still runs for in-flight positions.
         if bar.hhmm >= LATE_ENTRY_GATE:                                  return
-        if NEWS_FILTER and is_news_window(bar.hhmm):                     return
+        in_news = bool(NEWS_FILTER) and is_news_window(bar.hhmm)
+        if in_news and not NEWS_OVERRIDE_M4_RECLAIM:                     return
 
         # Volume-spike detection + cooldown (mirrors Autopilot.cpp:2092-2120).
         # Decoupled from NEWS_FILTER — runs regardless of news filter setting
@@ -1491,6 +1496,22 @@ class Backtester:
                         f"vwapOK={int(vwap_ok)} | M2poss={int(m2_poss)} "
                         f"M4poss={int(m4_poss)}(swHi={sw_hi_d:.2f} swLo={sw_lo_d:.2f}) "
                         f"M6poss={int(m6_poss)} | why={','.join(why) or '-'}")
+
+        # [news-override-ab] During news window with override: M4-only clean reclaims.
+        # Tighten M4 (close past sweep ≥ 2 ticks, sc ≥ 4 — no div fallback) and
+        # suppress all other modes. If nothing M4-clean is armed, skip the bar.
+        if in_news:  # NEWS_OVERRIDE_M4_RECLAIM is true here (gated above)
+            clean_l = clean_s = False
+            if i >= C_SWEEP_LB and atr > 0:
+                sw_lo_n = min(self.bars[j].low  for j in range(i - C_SWEEP_LB, i))
+                sw_hi_n = max(self.bars[j].high for j in range(i - C_SWEEP_LB, i))
+                clean_l = bar.close > sw_lo_n + 2 * TICK and sc_l >= 4
+                clean_s = bar.close < sw_hi_n - 2 * TICK and sc_s >= 4
+            m4l = m4l and clean_l
+            m4s = m4s and clean_s
+            m1l = m1s = m2l = m2s = m3l = m3s = m6l = m6s = m8l = m8s = False
+            if not (m4l or m4s):
+                return
 
         # ── Priority: M6 > M8 (fade) > M4 > M3 > M2 > M1   [v12.24 — M5+M7 removed]
         sel = -1; sl = False
