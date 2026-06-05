@@ -106,6 +106,7 @@ C_T1_FL      = 25.0;  C_T1_CL   = 50.0
 C_T2_FL      = 75.0;  C_T2_CL   = 125.0
 C_RM_FLOOR   = 0.60
 QUAL_FLOOR   = 50   # [v12.30 cpp; v12.26 lowered to 40, reverted after cross-contract A/B]
+QUAL_FLOOR_M2 = None  # if set, overrides QUAL_FLOOR for M2 (sel==1) only — used by backtest_m2_qual25_ab.py
 C_MIN_SC_M1  = 3
 C_MIN_SC_ALL = 3
 C_COOL_TRADE = 5
@@ -1574,7 +1575,8 @@ class Backtester:
         else:
             final_sc = sc_l if sl else sc_s
         q = qual100(sel, final_sc, fade_edge, fade_active)
-        if q < QUAL_FLOOR: return
+        floor = QUAL_FLOOR_M2 if (sel == 1 and QUAL_FLOOR_M2 is not None) else QUAL_FLOOR
+        if q < floor: return
 
         # ── Enter trade ───────────────────────────────────────────────────────
         self._enter(i, bar, sel, sl, atr, final_sc, ctrl, div,
