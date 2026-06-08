@@ -1948,8 +1948,8 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
         if(pRisk) pRisk->updatePnL(PnL);
 
         if(LOG_LVL>=LOG_SIG){
-            SCString M; M.Format("[V18A EXIT] %s %s %s $%.0f Hold:%d MAE:%.1f MFE:%.1f",
-                isL?"LONG":"SHORT", mName, ExR, PnL, Hold, TradeMAE, TradeMFE);
+            SCString M; M.Format("[V18A EXIT] %s %s %s $%.0f Sc=%d Hold:%d MAE:%.1f MFE:%.1f",
+                isL?"LONG":"SHORT", mName, ExR, PnL, TradeScore, Hold, TradeMAE, TradeMFE);
             sc.AddMessageToLog(M,0);
         }
 
