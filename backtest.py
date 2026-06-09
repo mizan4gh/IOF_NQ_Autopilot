@@ -107,6 +107,7 @@ C_T2_FL      = 75.0;  C_T2_CL   = 125.0
 C_RM_FLOOR   = 0.60
 QUAL_FLOOR   = 50   # [v12.30 cpp; v12.26 lowered to 40, reverted after cross-contract A/B]
 QUAL_FLOOR_M2 = None  # if set, overrides QUAL_FLOOR for M2 (sel==1) only — used by backtest_m2_qual25_ab.py
+QUAL_FLOOR_M4 = None  # if set, overrides QUAL_FLOOR for M4 (sel==3) only — used by backtest_m4floor60_ab.py
 C_MIN_SC_M1  = 3
 C_MIN_SC_ALL = 3
 C_COOL_TRADE = 5
@@ -166,6 +167,16 @@ RISK_MODEL   = "v12_32_fixed"
 #   1 = wick-reject gate (failed cross-contract A/B 2026-05-22 — kept for ref)
 #   2 = prior-bar dip + reclaim (default — cross-contract A/B passed 2026-05-22)
 M1_PULLBACK  = 2
+
+# [v12.20 port-back] Re-enable M5 (Trap Reversal) and M7 (Auction Reversal),
+# deleted in v12.21/v12.24. M5 fires on trap.phase==3 (failed breakout reclaim);
+# M7 fires on a fading imbalance at an extreme. Fidelity caveat: iceberg-based
+# components of M7's 8-check verify-score are not computable in Python (no
+# iceberg detection), so the "no counter-iceberg" check is granted free, biasing
+# M7 to fire slightly more than the cpp would.
+ENABLE_M5    = False
+ENABLE_M7    = False
+C_M7_MIN_VS  = 5    # M7 verify-score floor (cpp: rvVerifyScore>=5)
 
 # [v12.35] Per-bar mode-rejection diagnostic. Mirrors cpp sc.Input[26].
 #   0 = off (default — zero behavioural effect)
@@ -1029,7 +1040,12 @@ class Backtester:
         self.last_loss_bar  = -1
         self.last_stop_bar  = -1
         self.last_stop_dir  = 0
-        # [v12.24] last_m5_bar / prev_imb_* removed with M5/M7 modes.
+        # [v12.20 port-back] M5 cooldown + M7 prior-imbalance latched state.
+        # Restored when ENABLE_M5/ENABLE_M7 are True; otherwise unused.
+        self.last_m5_bar    = -1
+        self.prev_imb_dir   = 0
+        self.prev_imb_str   = 0
+        self.prev_imb_extreme = 0.0
 
         # Spike / volume-cool state (mirrors C++ pNews + pVCool; NEWS_FILTER gated)
         self.spike_bar       = -1
@@ -1219,7 +1235,10 @@ class Backtester:
         # ── Modes ────────────────────────────────────────────────────────────
         m1l = m1s = False
         m2l = m2s = m3l = m3s = m4l = m4s = False
+        m5l = m5s = False                # [v12.20 port-back]
         m6l = m6s = m8l = m8s = False
+        m7l = m7s = False                # [v12.20 port-back]
+        m7_stop = 0.0
         m6_sp = m6_t1 = m6_t2 = 0.0
         fade_active = False; fade_edge = fade_type = 0
         fd_sp = fd_t1 = fd_t2 = 0.0
@@ -1319,8 +1338,21 @@ class Backtester:
             if 3 in DISABLE_MODES:                      # suppress M4 (sweep+reclaim)
                 m4l = m4s = False
 
-        # [v12.24] M5 (Trap Reversal) removed. Was already pruned from the
-        # priority chain in v12.21; detection code is now removed too.
+        # [v12.20 port-back] M5 — Trap Reversal
+        # Arm SHORT when trap.direction == +1 (failed up-breakout) AND trap.phase==3
+        # AND short delta confirms (sc_s >= C_M5_MIN_SC) AND ctrl is not strongly bullish.
+        # Mirror cpp lines 2952-2971.
+        if ENABLE_M5 and self.trap.phase == 3:
+            cool_ok = (C_M5_COOLDOWN <= 0) or (self.last_m5_bar < 0) or (i > self.last_m5_bar + C_M5_COOLDOWN)
+            if cool_ok:
+                if self.trap.direction == +1 and sc_s >= C_M5_MIN_SC and ctrl <= 2:
+                    m5s = True
+                if self.trap.direction == -1 and sc_l >= C_M5_MIN_SC and ctrl >= -2:
+                    m5l = True
+                if m5l or m5s:
+                    self.last_m5_bar = i
+        if 4 in DISABLE_MODES:
+            m5l = m5s = False
 
         # M6 — Balance breakout
         bk_vs = 10  # mirrors C++ bkVerifyScore=10; stays 10 if no breakout so M8 gate (<=4) stays closed
@@ -1388,8 +1420,71 @@ class Backtester:
         if 5 in DISABLE_MODES:                      # suppress M6 entirely (top-priority)
             m6l = m6s = False; m6_sp = m6_t1 = m6_t2 = 0.0
 
-        # [v12.24] M7 (Auction Reversal) removed. The mode was dropped from
-        # the priority chain and the detection block is now also stripped.
+        # [v12.20 port-back] M7 — Auction Reversal
+        # Latch most recent active imbalance, then arm a reversal when it fades or dies.
+        # Cpp lines 3046-3101. Iceberg-presence check (component 8) is granted free
+        # since Python doesn't track icebergs — biases M7 to fire slightly more.
+        if ENABLE_M7:
+            if imb.active:
+                self.prev_imb_dir = imb.direction
+                self.prev_imb_str = imb.strength
+                self.prev_imb_extreme = bar.high if imb.direction > 0 else bar.low
+            rv_vs = 8
+            if self.prev_imb_dir != 0 and atr > 0:
+                imb_fading = imb.active and imb.strength < self.prev_imb_str - 1
+                imb_dead   = (not imb.active) and self.prev_imb_str >= 3
+                if imb_fading or imb_dead:
+                    rv_vs = 0
+                    rev_dir = -1 if self.prev_imb_dir > 0 else +1
+                    # 1. Delta exhaustion (decreasing |delta| over last 3 bars)
+                    if i >= 2:
+                        dm0 = abs(dlt)
+                        dm1 = abs(self.bars[i-1].ask_vol - self.bars[i-1].bid_vol)
+                        dm2 = abs(self.bars[i-2].ask_vol - self.bars[i-2].bid_vol)
+                        if dm0 < dm1 < dm2: rv_vs += 1
+                    # 2. Prev-imb extreme sits at a structural level (VB2 / VP)
+                    at_lev = False
+                    if self.prev_imb_dir > 0 and vb2u > 0 and self.prev_imb_extreme >= vb2u - atr * 0.3:
+                        at_lev = True
+                    if self.prev_imb_dir < 0 and vb2l > 0 and self.prev_imb_extreme <= vb2l + atr * 0.3:
+                        at_lev = True
+                    if self.vp.valid:
+                        for lv in (self.vp.poc, self.vp.vah, self.vp.val):
+                            if lv > 0 and abs(self.prev_imb_extreme - lv) <= atr * 0.5:
+                                at_lev = True; break
+                    if at_lev: rv_vs += 1
+                    # 3. Aggression flip on current bar
+                    avgd = self.avg_d[i] if i < len(self.avg_d) else max(1.0, abs(dlt))
+                    if rev_dir > 0 and dlt > 0 and abs(dlt) > avgd * 1.5: rv_vs += 1
+                    if rev_dir < 0 and dlt < 0 and abs(dlt) > avgd * 1.5: rv_vs += 1
+                    # 4. Body in reversal direction (>=55%)
+                    rng = bar.high - bar.low
+                    body = abs(bar.close - bar.open)
+                    body_pct = (body / rng) if rng > 0 else 0.0
+                    corr_dir = bull if rev_dir > 0 else bear
+                    if body_pct >= 0.55 and corr_dir: rv_vs += 1
+                    # 5. Trap confluence
+                    if self.trap.phase >= 2: rv_vs += 1
+                    # 6. Divergence supports reversal
+                    if rev_dir > 0 and div.strength >= 2: rv_vs += 1
+                    if rev_dir < 0 and div.strength <= -2: rv_vs += 1
+                    # 7. Volume burst
+                    if bal.avg_vol > 0 and bar.volume > bal.avg_vol * 1.8: rv_vs += 1
+                    # 8. No counter-iceberg — granted free (no iceberg detection in Python)
+                    rv_vs += 1
+                    if rv_vs >= C_M7_MIN_VS:
+                        if rev_dir > 0:
+                            m7l = True
+                            m7_stop = self.prev_imb_extreme - atr * 0.3
+                        else:
+                            m7s = True
+                            m7_stop = self.prev_imb_extreme + atr * 0.3
+                        self.prev_imb_dir = 0
+                        self.prev_imb_str = 0
+                        self.prev_imb_extreme = 0.0
+        if 6 in DISABLE_MODES:
+            m7l = m7s = False
+            m7_stop = 0.0
 
         # M8 — Fade (balance breakout fade, type 1)
         if not m6l and not m6s and bal.mature and atr > 0 and bk_vs <= 4:
@@ -1420,7 +1515,8 @@ class Backtester:
 
         # ── [instrumentation] per-mode arm counts (before downstream gates) ────
         for _mi, _ll, _ss in ((0, m1l, m1s), (1, m2l, m2s), (2, m3l, m3s),
-                              (3, m4l, m4s), (5, m6l, m6s), (7, m8l, m8s)):
+                              (3, m4l, m4s), (4, m5l, m5s), (5, m6l, m6s),
+                              (6, m7l, m7s), (7, m8l, m8s)):
             if _ll: self.arm_long[_mi]  += 1
             if _ss: self.arm_short[_mi] += 1
 
@@ -1429,7 +1525,8 @@ class Backtester:
         # Default no-op; xgb_candidate_label.py overrides to capture every armed
         # (mode, side) and forward-simulate its outcome. Passes a dict so the
         # signature stays stable as new features are added.
-        if any((m1l, m1s, m2l, m2s, m3l, m3s, m4l, m4s, m6l, m6s, m8l, m8s)):
+        if any((m1l, m1s, m2l, m2s, m3l, m3s, m4l, m4s,
+                m5l, m5s, m6l, m6s, m7l, m7s, m8l, m8s)):
             self._on_any_arm(i, dict(
                 bar=bar, atr=atr, vwap=vwap, ctrl=ctrl,
                 sc_l=sc_l, sc_s=sc_s, div_strength=div.strength,
@@ -1514,12 +1611,19 @@ class Backtester:
             if not (m4l or m4s):
                 return
 
-        # ── Priority: M6 > M8 (fade) > M4 > M3 > M2 > M1   [v12.24 — M5+M7 removed]
+        # ── Priority cascade
+        # [v12.20 port-back] When ENABLE_M5/ENABLE_M7 are on, restore v12.20 chain:
+        # M6 > M7 > M8 (fade) > M5 > M4 > M3 > M2 > M1.
+        # When both off, this collapses to the v12.24+ chain M6 > M8 > M4 > M3 > M2 > M1.
         sel = -1; sl = False
         if   m6l: sel = 5; sl = True
         elif m6s: sel = 5
+        elif m7l: sel = 6; sl = True
+        elif m7s: sel = 6
         elif m8l: sel = 7; sl = True
         elif m8s: sel = 7
+        elif m5l: sel = 4; sl = True
+        elif m5s: sel = 4
         elif m4l: sel = 3; sl = True
         elif m4s: sel = 3
         elif m3l: sel = 2; sl = True
@@ -1575,18 +1679,23 @@ class Backtester:
         else:
             final_sc = sc_l if sl else sc_s
         q = qual100(sel, final_sc, fade_edge, fade_active)
-        floor = QUAL_FLOOR_M2 if (sel == 1 and QUAL_FLOOR_M2 is not None) else QUAL_FLOOR
+        if sel == 1 and QUAL_FLOOR_M2 is not None:
+            floor = QUAL_FLOOR_M2
+        elif sel == 3 and QUAL_FLOOR_M4 is not None:
+            floor = QUAL_FLOOR_M4
+        else:
+            floor = QUAL_FLOOR
         if q < floor: return
 
         # ── Enter trade ───────────────────────────────────────────────────────
         self._enter(i, bar, sel, sl, atr, final_sc, ctrl, div,
                     tr, vr, cr, fade_active, fade_edge, fade_type,
-                    m6_sp, m6_t1, m6_t2, fd_sp, fd_t1, fd_t2)
+                    m6_sp, m6_t1, m6_t2, fd_sp, fd_t1, fd_t2, m7_stop)
 
     # ──────────────────────────────────────────────────────────────────────────
     def _enter(self, i, bar, sel, sl, atr, score, ctrl, div,
                tr, vr, cr, fade_active, fade_edge, fade_type,
-               m6_sp, m6_t1, m6_t2, fd_sp, fd_t1, fd_t2):
+               m6_sp, m6_t1, m6_t2, fd_sp, fd_t1, fd_t2, m7_stop=0.0):
 
         # Entry fill model — controlled by ENTRY_ORD (see constants block).
         # Mirrors cpp ENTRY_ORD semantics (sc.Input[8] in IOF_NQ_Autopilot.cpp).
@@ -1639,6 +1748,12 @@ class Backtester:
                 sp = round((ep + sd) / TICK) * TICK
                 t1 = round((ep - t1) / TICK) * TICK
                 t2 = round((ep - t2) / TICK) * TICK
+            # [v12.20 port-back] M7 stop = beyond prior-imbalance extreme (cpp line 3465).
+            # Targets stay ATR-based. Only override stop if it's tighter than the ATR
+            # default — wider prev-extreme stops keep the ATR stop.
+            if sel == 6 and m7_stop:
+                if sl and m7_stop > sp: sp = round(m7_stop / TICK) * TICK
+                if not sl and m7_stop < sp: sp = round(m7_stop / TICK) * TICK
 
         # Sanity
         min_sd = max(atr * 0.5, C_STOP_FL)
