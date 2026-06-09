@@ -178,6 +178,16 @@ ENABLE_M5    = False
 ENABLE_M7    = False
 C_M7_MIN_VS  = 5    # M7 verify-score floor (cpp: rvVerifyScore>=5)
 
+# [half-MFE-giveback exit] Motivated by 2026-06-08 SELL M4 NQM26: MFE hit 29pt
+# (58% of TP1), then full reversal to -40.5pt stop = -$810. v12.20's NEAR-TARGET
+# EXIT armed at MFE>=70% of TP1 — wouldn't have caught this. This variant arms
+# on a min-MFE-in-points threshold instead, then closes on a fixed % giveback.
+# Inserted in _manage BEFORE T2/T1 hit checks, only fires while t1_hit=False
+# (post-T1, trail handles the trailing exit).
+HALF_MFE_EXIT    = False
+HALF_MFE_MIN_PTS = 10.0  # min running MFE (in points) to arm the giveback exit
+HALF_MFE_GIVEBACK = 0.50 # fraction of MFE given back to trigger exit
+
 # [v12.35] Per-bar mode-rejection diagnostic. Mirrors cpp sc.Input[26].
 #   0 = off (default — zero behavioural effect)
 #   1 = collect a [V18A NOFIRE] record on bars where M1/M2/M3/M4/M6 all failed
@@ -1845,6 +1855,13 @@ class Backtester:
         max_risk = max(abs(self.entry_px - self.stop_px) * 3, atr * 3) * PT_VAL
         if op * PT_VAL < -max_risk:
             self._close(i, bar.close, "CB"); return
+
+        # [half-MFE-giveback] Close at market when running MFE has retraced by
+        # ≥HALF_MFE_GIVEBACK (fraction) AND MFE peak was ≥HALF_MFE_MIN_PTS.
+        # Only active pre-T1; once T1 hits, trail logic owns the exit.
+        if HALF_MFE_EXIT and not self.t1_hit and self._mfe >= HALF_MFE_MIN_PTS:
+            if op <= self._mfe * (1.0 - HALF_MFE_GIVEBACK):
+                self._close(i, bar.close, "HALF_MFE"); return
 
         if SCALE_OUT and self.qty >= 2:
             self._manage_scaled(i, bar, atr); return
