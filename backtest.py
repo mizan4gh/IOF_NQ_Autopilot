@@ -188,6 +188,15 @@ HALF_MFE_EXIT    = False
 HALF_MFE_MIN_PTS = 10.0  # min running MFE (in points) to arm the giveback exit
 HALF_MFE_GIVEBACK = 0.50 # fraction of MFE given back to trigger exit
 
+# [early-scratch] At the last bar before the stop becomes eligible (entry+3),
+# exit at close if the trade has shown no meaningful favorable excursion.
+# Loser signature in prod baselines: stop-outs die with MFE <= 17 pt while
+# winners reach 59+ pt. Guarded so it only fires when the close is better
+# than the stop level — it can never produce a worse fill than the stop.
+EARLY_SCRATCH = False
+ES_AT_BAR     = 3     # check at i == entry_bar + ES_AT_BAR
+ES_MFE_FRAC   = 0.25  # scratch if MFE < frac * initial stop distance
+
 # [v12.35] Per-bar mode-rejection diagnostic. Mirrors cpp sc.Input[26].
 #   0 = off (default — zero behavioural effect)
 #   1 = collect a [V18A NOFIRE] record on bars where M1/M2/M3/M4/M6 all failed
@@ -1881,6 +1890,13 @@ class Backtester:
                 else:
                     self.stop_px = round((self.entry_px - buf) / TICK) * TICK
 
+        # [early-scratch] see flag block; runs after T1 check so a same-bar
+        # T1 touch wins, before the stop becomes eligible at entry+4.
+        if EARLY_SCRATCH and not self.t1_hit and i == self.entry_bar + ES_AT_BAR:
+            sd = abs(self.entry_px - self.stop_px)
+            if self._mfe < sd * ES_MFE_FRAC and op > -sd:
+                self._close(i, bar.close, "SCRATCH"); return
+
         # Trail (after T1, single-lot delay = 3×)
         if self.t1_hit:
             delay = C_TRAIL_DLY * 3
@@ -1926,7 +1942,7 @@ class Backtester:
         self.day_pnl += pnl
         self.tot_pnl += pnl
 
-        if pnl < 0 and reason in ("STOP", "CB", "TRAIL"):
+        if pnl < 0 and reason in ("STOP", "CB", "TRAIL", "SCRATCH"):
             self.last_stop_bar = i
             self.last_stop_dir = 1 if il else -1
         if pnl < 0: self.last_loss_bar = i

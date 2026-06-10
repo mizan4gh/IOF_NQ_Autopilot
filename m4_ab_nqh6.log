@@ -1,0 +1,7 @@
+
+========== NQH6 :: baseline_m4_bump0 ==========
+  M4_SC_BUMP = 0
+Reading C:\SierraChart\Data\NQH6.CME.scid
+  File size: 1.23 GB  (30,838,366 records)  price_scale=÷100
+  Loaded 30,838,366 records.
+Building 3000-contract volume bars ...

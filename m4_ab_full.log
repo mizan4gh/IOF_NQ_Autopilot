@@ -1,0 +1,75 @@
+
+========== NQZ25 :: baseline_m4_bump0 ==========
+  M4_SC_BUMP = 0
+Reading C:\Users\17034\MyFolder\IOF_NQ_Production_Final\NQZ25-CME.scid
+  File size: 0.51 GB  (12,774,761 records)  price_scale=÷1
+  Loaded 12,774,761 records.
+Building 3000-contract volume bars ...
+  Total bars: 4,613  |  RTH bars: 3,310
+Running backtest ...
+  Pre-computing indicators (4,613 bars)...
+  Running strategy loop...
+  [DIAG] spike triggers: range=0 delta=0 vcool_threshold_hits=0 | bars_blocked spike=0 vcool=0 | peak_range_ratio=2.55
+  [DIAG] risk_model=v12_32_fixed setups_killed_by_RM_floor=9
+  Generated 10 records  (5 completed trades)
+
+==============================================================
+  IOF NQ AUTOPILOT — BACKTEST SUMMARY  (NQZ25-CME)
+==============================================================
+  Total trades    : 5
+  Win rate        : 60.0%  (3W / 2L)
+  Net P&L         : $4,840.00
+  Avg win         : $1,983.33
+  Avg loss        : $-555.00
+  Profit factor   : 5.36
+--------------------------------------------------------------
+  Mode      Trades       WR     Net P&L
+  M1             3    66.7%    2,140.00
+  M2             1     0.0%     -575.00
+  M6             1   100.0%    3,275.00
+--------------------------------------------------------------
+  Exit reasons: STOP:2, TRAIL:3
+==============================================================
+
+CSV written to: C:\Users\17034\MyFolder\IOF_NQ_Production_Final\IOF_NQ_backtest_NQZ25_baseline_m4_bump0.csv
+
+========== NQZ25 :: tight_m4_bump1 ==========
+  M4_SC_BUMP = 1
+Reading C:\Users\17034\MyFolder\IOF_NQ_Production_Final\NQZ25-CME.scid
+  File size: 0.51 GB  (12,774,761 records)  price_scale=÷1
+  Loaded 12,774,761 records.
+Building 3000-contract volume bars ...
+  Total bars: 4,613  |  RTH bars: 3,310
+Running backtest ...
+  Pre-computing indicators (4,613 bars)...
+  Running strategy loop...
+  [DIAG] spike triggers: range=0 delta=0 vcool_threshold_hits=0 | bars_blocked spike=0 vcool=0 | peak_range_ratio=2.55
+  [DIAG] risk_model=v12_32_fixed setups_killed_by_RM_floor=7
+  Generated 10 records  (5 completed trades)
+
+==============================================================
+  IOF NQ AUTOPILOT — BACKTEST SUMMARY  (NQZ25-CME)
+==============================================================
+  Total trades    : 5
+  Win rate        : 60.0%  (3W / 2L)
+  Net P&L         : $4,840.00
+  Avg win         : $1,983.33
+  Avg loss        : $-555.00
+  Profit factor   : 5.36
+--------------------------------------------------------------
+  Mode      Trades       WR     Net P&L
+  M1             3    66.7%    2,140.00
+  M2             1     0.0%     -575.00
+  M6             1   100.0%    3,275.00
+--------------------------------------------------------------
+  Exit reasons: STOP:2, TRAIL:3
+==============================================================
+
+CSV written to: C:\Users\17034\MyFolder\IOF_NQ_Production_Final\IOF_NQ_backtest_NQZ25_tight_m4_bump1.csv
+
+========== NQH6 :: baseline_m4_bump0 ==========
+  M4_SC_BUMP = 0
+Reading C:\SierraChart\Data\NQH6.CME.scid
+  File size: 1.23 GB  (30,838,366 records)  price_scale=÷100
+  Loaded 30,838,366 records.
+Building 3000-contract volume bars ...

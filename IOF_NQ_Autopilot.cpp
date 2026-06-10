@@ -19,7 +19,7 @@ SCDLLName("IOF_NQ_Autopilot")
 //  IOF NQ — Pure Orderflow Autopilot
 //  Sierra Chart ACSIL Study
 //
-//  Version: v12.36 (May 2026; late-entry gate: skip new SETUPs at BarHHMM >= 1500)
+//  Version: v12.37 (June 2026; early-scratch exit: abandon dead pre-T1 trades at stop-eligibility bar)
 //
 //  CHANGES SINCE v11:
 //    [v12.1] RM floor 0.80 -> 0.60, Kelly cold-start 0.8 -> 0.9.
@@ -122,6 +122,17 @@ SCDLLName("IOF_NQ_Autopilot")
 //    [v12.22] M5 (Trap Reversal) mode restored. All modes active: M1–M8.
 //             Phase-3 trap progression and M5 signal block reinstated from v12.20
 //             state (reclaim-reset, phase-3 timeout, DL/DS-only entry, ctrl>=0 gate).
+//
+//    [v12.37] Early-scratch exit. On the first bar the stop becomes eligible
+//             (Idx==EntryBar+4), a pre-T1 trade whose MFE never reached 25%
+//             of stop distance is closed at market ("SCRATCH") provided price
+//             is still better than the stop level. Motivated by sortino_audit:
+//             100% of downside variance = pre-T1 stops, all dead by bar 3
+//             (MFE<=17pt) while winners run 59-277pt. Cross-contract A/B
+//             2026-06-09 (backtest_early_scratch_ab.py): NQZ25 +$410 (Sortino/
+//             day 1.55->2.70), NQM5 tied (slow-start winner NOT scratched),
+//             NQH6 +$440 (MaxDD -$2,480->-$2,040). Counts as a stop for
+//             cooldown state when underwater.
 //
 //    [v12.36] Late-entry gate. Skip new SETUPs at BarHHMM >= 1500. Cross-
 //             contract A/B (NQZ25 + NQM5) on 2026-05-28: NQZ25 +$395 (vetoed
@@ -490,6 +501,11 @@ static const int FR_T1      = 7;
 static const int FR_T2      = 8;
 static const int FR_DAILY_PROFIT = 9;
 static const int FR_DAILY_LOSS   = 10;
+static const int FR_SCRATCH      = 11;  // [v12.37] early-scratch exit
+
+// [v12.37] Early-scratch threshold: abandon a pre-T1 trade that never reached
+// this fraction of stop distance in MFE by the time the stop becomes eligible.
+static const float C_ES_MFE_FRAC = 0.25f;
 
 // ============================================================================
 //  DELTA RING BUFFER
@@ -652,7 +668,7 @@ static void WriteCSV(SCStudyInterfaceRef& sc, const char* Evt, const char* Side,
               "%d,%d,%.0f,%.2f,"
               "%.2f,%s,%d,%.2f,%.2f,"
               "%.2f,%.2f,%d,%d,"
-              "%.2f,%d,%d,%d,v12.36,%llu\n",
+              "%.2f,%d,%d,%d,v12.37,%llu\n",
         Y,Mo,D,Hr,Mi,Se,Evt,Side,Mode,Entry,SL,TP1,TP2,Qty,Score,
         CtrlSc,DivStr,Delta,BarSpd,
         ExitPx,ExitR,Hold,MAE,MFE,
@@ -1720,7 +1736,7 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
     if(!BannerShown && DIAG) {
         InitRunID();
         SCString m;
-        m.Format("=== V18A v12.36 LOAD sym=%s tick=%.4f tickval=$%.2f Cap=$%.0f DailyLoss=$%.0f DailyProf=$%.0f "
+        m.Format("=== V18A v12.37 LOAD sym=%s tick=%.4f tickval=$%.2f Cap=$%.0f DailyLoss=$%.0f DailyProf=$%.0f "
                  "MaxTr=%d FlatT=%d Qty=%d Live=%d Regime=%d Fade=%d News=%d AutoDis=%d M1=%d "
                  "RM_FLOOR=%.2f QUAL_FLOOR=%d CD_trd=%d CD_loss=%d CD_stop=%d RunID=%llu ===",
             sc.Symbol.GetChars(), TICK, TICK_VAL, Capital, DAILY_LOSS, DAILY_PROF,
@@ -1867,6 +1883,7 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
         else if(FlattenReason==FR_DAILY_LOSS){ExR="DAILY_LOSS"; FlattenReason=FR_NONE;}
         else if(FlattenReason==FR_STOP){ExR="STOP"; ExPx=StopPx; FlattenReason=FR_NONE;}
         else if(FlattenReason==FR_TRAIL){ExR="TRAIL"; ExPx=StopPx; FlattenReason=FR_NONE;}
+        else if(FlattenReason==FR_SCRATCH){ExR="SCRATCH"; FlattenReason=FR_NONE;}
         else if(FlattenReason==FR_T1){ExR="TP1"; ExPx=T1Px; FlattenReason=FR_NONE;}
         else if(FlattenReason==FR_T2){ExR="TP2"; ExPx=T2Px; FlattenReason=FR_NONE;}
         else if(isL){
@@ -2415,6 +2432,30 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
             const bool isL=(TradeState==1||TradeState==2);
             if((isL?(posQty<=0):(posQty>=0))&&Idx>EntryBar+3){
                 TradeState=0; T1Hit=0; T1HitBar=-1; LastExitBar=Idx; return;
+            }
+            // [v12.37] Early-scratch. Pre-T1 losers show MFE <= 17pt by bar 3
+            //          while winners reach 59pt+ (sortino_audit.py on prod
+            //          baselines). On the first bar the stop becomes eligible
+            //          (EntryBar+4 == bar-3 close in backtest terms), exit at
+            //          market if the trade never reached C_ES_MFE_FRAC of stop
+            //          distance in MFE and price is still better than the stop
+            //          level — so this can never fill worse than the stop the
+            //          trade was already going to take. Counts as a stop for
+            //          cooldown state when underwater. Cross-contract A/B
+            //          2026-06-09 (backtest_early_scratch_ab.py): NQZ25 +$410,
+            //          NQM5 tied, NQH6 +$440, no contract worse.
+            if(!T1Hit&&Idx==EntryBar+4){
+                float esStopDist=(StopPx>0.f)?FAbs(EntryPx-StopPx):ATR;
+                float esOpenPnL=isL?(Close0-EntryPx):(EntryPx-Close0);
+                if(TradeMFE<esStopDist*C_ES_MFE_FRAC&&esOpenPnL>-esStopDist){
+                    FlattenReason=FR_SCRATCH;
+                    s_SCNewOrder em; em.OrderType=SCT_ORDERTYPE_MARKET;
+                    em.OrderQuantity=(int)FAbs((float)posQty);
+                    if(isL) sc.BuyExit(em); else sc.SellExit(em);
+                    if(esOpenPnL<0.f){ LastStopBar=Idx; LastStopDir=isL?1:-1; }
+                    TradeState=0; T1Hit=0; T1HitBar=-1; LastExitBar=Idx;
+                    return;
+                }
             }
             if(!T1Hit&&Idx>EntryBar+3){
                 bool sH=isL?(Low0<=StopPx+TICK):(High0>=StopPx-TICK);
