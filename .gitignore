@@ -9,7 +9,16 @@ IOF_NQ_edge_*.csv
 IOF_NQ_nofire_*.csv
 IOF_NQ_sweep_*.csv
 IOF_NQ_prod_*.csv
+IOF_NQ_funnel_*.csv
+IOF_NQ_m1qf40_*.csv
+IOF_NQ_m2qf30_*.csv
+IOF_NQ_qfprof_*.csv
+IOF_NQ_v13modes_*.csv
+IOF_NQ_vptgt_*.csv
 tmp_*.csv
+
+# Editor settings
+.vscode/
 
 # Live trade journals (per-contract; appended to by the running strategy)
 IOF_NQ_NQ*.csv

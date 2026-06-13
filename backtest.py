@@ -108,7 +108,10 @@ C_RM_FLOOR   = 0.60
 QUAL_FLOOR   = 50   # [v12.30 cpp; v12.26 lowered to 40, reverted after cross-contract A/B]
 QUAL_FLOOR_M1 = None  # if set, overrides QUAL_FLOOR for M1 (sel==0) only — used by backtest_m1_qf40_ab.py
 QUAL_FLOOR_M2 = None  # if set, overrides QUAL_FLOOR for M2 (sel==1) only — used by backtest_m2_qual25_ab.py
+QUAL_FLOOR_M3 = None  # if set, overrides QUAL_FLOOR for M3 (sel==2) only
 QUAL_FLOOR_M4 = None  # if set, overrides QUAL_FLOOR for M4 (sel==3) only — used by backtest_m4floor60_ab.py
+QUAL_FLOOR_M6 = None  # if set, overrides QUAL_FLOOR for M6 (sel==5) only
+QUAL_FLOOR_M8 = None  # if set, overrides QUAL_FLOOR for M8 (sel==7) only
 C_MIN_SC_M1  = 3
 C_MIN_SC_ALL = 3
 C_COOL_TRADE = 5
@@ -197,6 +200,15 @@ HALF_MFE_GIVEBACK = 0.50 # fraction of MFE given back to trigger exit
 EARLY_SCRATCH = False
 ES_AT_BAR     = 3     # check at i == entry_bar + ES_AT_BAR
 ES_MFE_FRAC   = 0.25  # scratch if MFE < frac * initial stop distance
+
+# [vp-targets] T1/T2 at volume-profile levels instead of ATR multiples.
+# For a LONG: T1 = nearest of (POC, VAH, VAL) at least VP_T_MIN_ATR*ATR above
+# entry, T2 = next level beyond it; mirrored for shorts. Each target falls
+# back to the ATR/mode-specific value independently when no level qualifies.
+# Stops and BE/trail mechanics untouched — isolates the target variable.
+# Used by backtest_vp_targets_ab.py.
+VP_TARGETS   = False
+VP_T_MIN_ATR = 0.5   # level must be >= this * ATR beyond entry to be a target
 
 # [v12.35] Per-bar mode-rejection diagnostic. Mirrors cpp sc.Input[26].
 #   0 = off (default — zero behavioural effect)
@@ -1643,6 +1655,13 @@ class Backtester:
             if not (m4l or m4s):
                 return
 
+        # DISABLE_MODES suppression for the modes whose arm-sites lack an inline
+        # guard (M1/M2/M3/M8). M4/M5/M6/M7 are guarded at their arm-sites above.
+        if 0 in DISABLE_MODES: m1l = m1s = False
+        if 1 in DISABLE_MODES: m2l = m2s = False
+        if 2 in DISABLE_MODES: m3l = m3s = False
+        if 7 in DISABLE_MODES: m8l = m8s = False
+
         # ── Priority cascade
         # [v12.20 port-back] When ENABLE_M5/ENABLE_M7 are on, restore v12.20 chain:
         # M6 > M7 > M8 (fade) > M5 > M4 > M3 > M2 > M1.
@@ -1727,8 +1746,14 @@ class Backtester:
             floor = QUAL_FLOOR_M1
         elif sel == 1 and QUAL_FLOOR_M2 is not None:
             floor = QUAL_FLOOR_M2
+        elif sel == 2 and QUAL_FLOOR_M3 is not None:
+            floor = QUAL_FLOOR_M3
         elif sel == 3 and QUAL_FLOOR_M4 is not None:
             floor = QUAL_FLOOR_M4
+        elif sel == 5 and QUAL_FLOOR_M6 is not None:
+            floor = QUAL_FLOOR_M6
+        elif sel == 7 and QUAL_FLOOR_M8 is not None:
+            floor = QUAL_FLOOR_M8
         else:
             floor = QUAL_FLOOR
         if q < floor:
@@ -1805,6 +1830,24 @@ class Backtester:
             if sel == 6 and m7_stop:
                 if sl and m7_stop > sp: sp = round(m7_stop / TICK) * TICK
                 if not sl and m7_stop < sp: sp = round(m7_stop / TICK) * TICK
+
+        # [vp-targets] Override T1/T2 with VP levels (per-target ATR fallback).
+        if VP_TARGETS and self.vp.valid and atr > 0:
+            lvls = sorted(lv for lv in (self.vp.poc, self.vp.vah, self.vp.val)
+                          if lv > 0)
+            mind = atr * VP_T_MIN_ATR
+            if sl:
+                above = [lv for lv in lvls if lv >= ep + mind]
+                if above:
+                    t1 = round(above[0] / TICK) * TICK
+                    nxt = [lv for lv in above[1:] if lv > above[0]]
+                    t2 = round(nxt[0] / TICK) * TICK if nxt else max(t2, t1 + TICK)
+            else:
+                below = [lv for lv in lvls if lv <= ep - mind]
+                if below:
+                    t1 = round(below[-1] / TICK) * TICK
+                    nxt = [lv for lv in below[:-1] if lv < below[-1]]
+                    t2 = round(nxt[-1] / TICK) * TICK if nxt else min(t2, t1 - TICK)
 
         # Sanity
         min_sd = max(atr * 0.5, C_STOP_FL)
