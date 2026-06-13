@@ -106,6 +106,7 @@ C_T1_FL      = 25.0;  C_T1_CL   = 50.0
 C_T2_FL      = 75.0;  C_T2_CL   = 125.0
 C_RM_FLOOR   = 0.60
 QUAL_FLOOR   = 50   # [v12.30 cpp; v12.26 lowered to 40, reverted after cross-contract A/B]
+QUAL_FLOOR_M1 = None  # if set, overrides QUAL_FLOOR for M1 (sel==0) only — used by backtest_m1_qf40_ab.py
 QUAL_FLOOR_M2 = None  # if set, overrides QUAL_FLOOR for M2 (sel==1) only — used by backtest_m2_qual25_ab.py
 QUAL_FLOOR_M4 = None  # if set, overrides QUAL_FLOOR for M4 (sel==3) only — used by backtest_m4floor60_ab.py
 C_MIN_SC_M1  = 3
@@ -1032,6 +1033,14 @@ class Backtester:
         self.trap  = Trap()
         self.rm_gated = 0            # [v12.32-ab] count of SETUPs killed by RM<floor
 
+        # [funnel] post-cascade gate kill counters — which gate eats armed setups.
+        # Used by funnel_report.py; zero-cost when unread.
+        self.funnel = {k: 0 for k in (
+            "armed", "regime", "m1_extra", "rm_floor", "cool_stop", "qual", "entered")}
+        self.funnel_mode = {}        # per-mode {armed, qual, entered}
+        self.funnel_qual_killed = [] # (mode, q) for every qual-floor kill
+        self.fn_days_rth = set(); self.fn_days_armed = set(); self.fn_days_entered = set()
+
         # Trade state
         self.in_pos     = False
         self.is_long    = False
@@ -1119,6 +1128,8 @@ class Backtester:
               f"bars_blocked spike={self.dbg_spike_blocked} vcool={self.dbg_vcool_blocked} | "
               f"peak_range_ratio={self.dbg_max_range_ratio:.2f}")
         print(f"  [DIAG] risk_model={RISK_MODEL} setups_killed_by_RM_floor={self.rm_gated}")
+        print(f"  [DIAG] funnel {self.funnel} | days: RTH={len(self.fn_days_rth)} "
+              f"armed={len(self.fn_days_armed)} traded={len(self.fn_days_entered)}")
 
         return self.out
 
@@ -1162,6 +1173,8 @@ class Backtester:
                 self._close(i, bar.close, "FLATTEN")
             self.day_done = True
             return
+        if bar.hhmm >= RTH_OPEN:
+            self.fn_days_rth.add(bar.dt.date())
         if bar.hhmm < RTH_OPEN or self.day_done:
             return
 
@@ -1653,18 +1666,28 @@ class Backtester:
         elif m1s: sel = 0
         if sel < 0: return
 
+        _mname = ("M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8")[sel]
+        _fm = self.funnel_mode.setdefault(_mname, {"armed": 0, "qual": 0, "entered": 0})
+        self.funnel["armed"] += 1; _fm["armed"] += 1
+        self.fn_days_armed.add(bar.dt.date())
+
         # ── Regime filter ────────────────────────────────────────────────────
         tr, cr = self._regime(i, atr, vwap)
         ts     = self._trend_str(i, atr)
         vr     = self._vol_reg(i, atr)
-        if not self._regime_ok(sel, sl, tr, cr, ts): return
-        if sel == 0 and vr == 0: return   # M1: no trades in flat/low-ATR market
-        if sel == 0 and 1200 <= bar.hhmm <= 1359: return  # M1: dead zone (0% WR 12-14h)
+        if not self._regime_ok(sel, sl, tr, cr, ts):
+            self.funnel["regime"] += 1; return
+        if sel == 0 and vr == 0:          # M1: no trades in flat/low-ATR market
+            self.funnel["m1_extra"] += 1; return
+        if sel == 0 and 1200 <= bar.hhmm <= 1359:  # M1: dead zone (0% WR 12-14h)
+            self.funnel["m1_extra"] += 1; return
         if sel == 0:  # M1 directional trend gate: don't buy into downtrend / sell into uptrend
             lb20 = min(20, i)
             pc20 = bar.close - self.bars[i - lb20].close if lb20 > 0 else 0.0
-            if sl  and pc20 < -atr * 0.5: return   # LONG into falling market
-            if not sl and pc20 >  atr * 0.5: return  # SHORT into rising market
+            if sl  and pc20 < -atr * 0.5:   # LONG into falling market
+                self.funnel["m1_extra"] += 1; return
+            if not sl and pc20 >  atr * 0.5:  # SHORT into rising market
+                self.funnel["m1_extra"] += 1; return
 
         # ── RM floor ─────────────────────────────────────────────────────────
         # [v12.32-ab] Gate by full RM model (mirrors cpp line 3453). The legacy
@@ -1672,6 +1695,7 @@ class Backtester:
         # inst_risk.rm which can dip below the floor under the buggy model.
         if self.inst_risk.rm < C_RM_FLOOR:
             self.rm_gated += 1
+            self.funnel["rm_floor"] += 1
             self._on_rm_gated(
                 i, sel, sl, atr, ctrl, div, sc_l, sc_s, bk_vs,
                 m6_sp, m6_t1, m6_t2,
@@ -1682,7 +1706,8 @@ class Backtester:
         # ── Post-stop cooldown (direction-specific) ───────────────────────────
         if self.last_stop_bar >= 0 and i <= self.last_stop_bar + C_COOL_STOP:
             same = (sl and self.last_stop_dir > 0) or (not sl and self.last_stop_dir < 0)
-            if same: return
+            if same:
+                self.funnel["cool_stop"] += 1; return
 
         # ── Quality score ─────────────────────────────────────────────────────
         # M1/M2/M3: (finalScore*100)/15 — need score >= 6 to clear floor 40.
@@ -1698,15 +1723,22 @@ class Backtester:
         else:
             final_sc = sc_l if sl else sc_s
         q = qual100(sel, final_sc, fade_edge, fade_active)
-        if sel == 1 and QUAL_FLOOR_M2 is not None:
+        if sel == 0 and QUAL_FLOOR_M1 is not None:
+            floor = QUAL_FLOOR_M1
+        elif sel == 1 and QUAL_FLOOR_M2 is not None:
             floor = QUAL_FLOOR_M2
         elif sel == 3 and QUAL_FLOOR_M4 is not None:
             floor = QUAL_FLOOR_M4
         else:
             floor = QUAL_FLOOR
-        if q < floor: return
+        if q < floor:
+            self.funnel["qual"] += 1; _fm["qual"] += 1
+            self.funnel_qual_killed.append((_mname, q))
+            return
 
         # ── Enter trade ───────────────────────────────────────────────────────
+        self.funnel["entered"] += 1; _fm["entered"] += 1
+        self.fn_days_entered.add(bar.dt.date())
         self._enter(i, bar, sel, sl, atr, final_sc, ctrl, div,
                     tr, vr, cr, fade_active, fade_edge, fade_type,
                     m6_sp, m6_t1, m6_t2, fd_sp, fd_t1, fd_t2, m7_stop)
