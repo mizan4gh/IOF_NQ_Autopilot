@@ -152,6 +152,13 @@ SCALE_OUT    = False         # True = enable multi-lot scale-out
 BASE_QTY     = 1             # base contracts per entry
 SIZE_BY_RM   = False         # True = qty = max(1, round(BASE_QTY * risk_mult))
 DISABLE_MODES = set()        # mode indices (per MODE_NAMES) to suppress, e.g. {5}=M6
+# [v13] Model the v13 cpp's M8 redefinition: balance-edge fade WITHOUT the trap
+# edge term (v13 removed the trap subsystem) + adds the trend-exhaustion fade
+# (type 3) that backtest.py never modeled. Default off → baseline M8 unchanged,
+# every existing harness stays byte-identical. NOTE: v13's *score* change (drop
+# S7/S8/S10/S11) is NOT modelable here — backtest.py's score is a 5-bar delta
+# count, not the cpp's 12-signal sum, so those sub-signals were never present.
+V13_MODEL    = False
 TICK         = 0.25
 PT_VAL       = 20.0          # NQ: $20/point ($5/tick)
 COMMISSION   = 5.0           # RT per trade
@@ -1531,13 +1538,16 @@ class Backtester:
             m7_stop = 0.0
 
         # M8 — Fade (balance breakout fade, type 1)
+        # [v13] Under V13_MODEL the trap edge term is dropped (v13 removed the
+        # trap subsystem); baseline keeps it. Type-3 trend-exhaustion fade below
+        # is V13_MODEL-only (backtest.py never modeled it for the v12.37 proxy).
         if not m6l and not m6s and bal.mature and atr > 0 and bk_vs <= 4:
             bk_t = atr * 0.30
             if bar.high > bal.hi + bk_t * 0.5 and bar.close < bal.hi + bk_t * 0.3 and bear:
                 edge = 1
                 if div.strength <= -2: edge += 2
                 if div.persist_abs_sell: edge += 1
-                if self.trap.phase >= 2 and self.trap.direction == +1: edge += 2
+                if not V13_MODEL and self.trap.phase >= 2 and self.trap.direction == +1: edge += 2
                 if edge >= 4:
                     m8s = True; fade_active = True; fade_type = 1; fade_edge = edge
                     fd_sp = bar.high + atr * 0.3
@@ -1546,11 +1556,45 @@ class Backtester:
                 edge = 1
                 if div.strength >= 2: edge += 2
                 if div.persist_abs_buy: edge += 1
-                if self.trap.phase >= 2 and self.trap.direction == -1: edge += 2
+                if not V13_MODEL and self.trap.phase >= 2 and self.trap.direction == -1: edge += 2
                 if edge >= 4:
                     m8l = True; fade_active = True; fade_type = 1; fade_edge = edge
                     fd_sp = bar.low - atr * 0.3
                     fd_t1 = bal.poc; fd_t2 = bal.hi
+
+        # [v13] M8 type 3 — trend-exhaustion fade. Ported from the v13 cpp
+        # (= v12.37 cpp lines 3433-3461). Only active under V13_MODEL.
+        if V13_MODEL and not m6l and not m6s and not m8l and not m8s and i >= 8 and atr > 0:
+            trend_bars = sum(1 if self.bars[i-k].close > self.bars[i-k].open else -1
+                             for k in range(8))
+            up_t = trend_bars >= 4
+            dn_t = trend_bars <= -4
+            if up_t or dn_t:
+                dm0 = abs(dlt)
+                dm1 = abs(self.bars[i-1].ask_vol - self.bars[i-1].bid_vol) if i >= 1 else dm0
+                dm2 = abs(self.bars[i-2].ask_vol - self.bars[i-2].bid_vol) if i >= 2 else dm0
+                delta_dec = dm0 < dm1 < dm2
+                rng = bar.high - bar.low
+                body_small = rng > 0 and abs(bar.close - bar.open) < rng * 0.4
+                vol_dec = i >= 2 and self.bars[i].volume < self.bars[i-1].volume < self.bars[i-2].volume
+                exh = 0
+                if delta_dec: exh += 2
+                if body_small: exh += 1
+                if vol_dec: exh += 2
+                if up_t and div.strength <= -2: exh += 2
+                if dn_t and div.strength >=  2: exh += 2
+                if exh >= 6:
+                    if up_t:
+                        m8s = True; fade_active = True; fade_type = 3; fade_edge = exh
+                        fd_sp = bar.high + atr * 0.4
+                        fd_t1 = bar.close - atr * 1.0
+                        fd_t2 = vwap if vwap > 0 else (bar.close - atr * 2.0)
+                    elif dn_t:
+                        m8l = True; fade_active = True; fade_type = 3; fade_edge = exh
+                        fd_sp = bar.low - atr * 0.4
+                        fd_t1 = bar.close + atr * 1.0
+                        fd_t2 = vwap if vwap > 0 else (bar.close + atr * 2.0)
+
         # [v12.25] M8 strict CtrlScore gate. Fades require neutral/correct-side flow.
         if m8l and ctrl < 0:
             m8l = False; fade_active = False; fade_edge = 0; fade_type = 0
