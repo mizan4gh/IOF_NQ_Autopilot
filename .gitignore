@@ -46,3 +46,15 @@ __pycache__/
 
 # Claude session data
 .claude/
+
+# Backtest outputs that were previously tracked (removed 2026-06-25)
+IOF_NQ_1pd_*.csv
+IOF_NQ_dailyloss_*.csv
+IOF_NQ_halfmfe_*.csv
+IOF_NQ_m4floor60_*.csv
+IOF_NQ_oneoff_*.csv
+IOF_NQ_opencool_*.csv
+IOF_NQ_qf33_*.csv
+IOF_NQ_scratch_*.csv
+candidates_*.csv
+xgb_*.csv
