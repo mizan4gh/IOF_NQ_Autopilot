@@ -19,6 +19,7 @@ SCDLLName("IOF_NQ_Autopilot")
 //  IOF NQ — Pure Orderflow Autopilot
 //  Sierra Chart ACSIL Study
 //
+//  Version: v12.38 (June 2026; M8 Fade Engine quality floor 50->60, sheds losing Q<=50 type-2 fades)
 //  Version: v12.37 (June 2026; early-scratch exit: abandon dead pre-T1 trades at stop-eligibility bar)
 //
 //  CHANGES SINCE v11:
@@ -486,6 +487,19 @@ static const float C_RM_FLOOR       = 0.60f;
 //          contracts — a future mode-specific floor (M4@40, others @50) is a
 //          plausible v12.31 candidate but needs a 3rd contract first.
 static const int V18A_QUALITY_FLOOR = 50;
+// [v12.38] Mode-specific floor for M8 (Fade Engine), raised 50->60. The M8
+//          quality scale is edgeScore*10 (V18A_QualityScore100), so floor 60
+//          sheds the edge<=5 band — the type-2 range/imbalance fades that lose.
+//          Evidence: 2026-06-26 live NQU26 lost -$1,150, all from two Q=50
+//          (edge-5) M8 type-2 shorts run over by an uptrend; M4 won the same
+//          day. 3-contract Python A/B (M8 fade engine ported into backtest.py)
+//          confirmed Q<=50 type-2 fades have negative edge on NQZ25/NQM5/NQH6;
+//          floor 60 keeps only the edge>=6 (type-4 absorption) fades, which are
+//          ~neutral. Surgical: leaves all other modes at 50. The Python A/B
+//          MAGNITUDE is inflated by a harness Imb-extreme artifact, but the
+//          sign (Q<=50 type-2 loses) is corroborated live, which is what this
+//          floor gates on.
+static const int V18A_QUALITY_FLOOR_M8 = 60;
 
 static const int LOG_CRIT = 0;
 static const int LOG_SIG  = 1;
@@ -668,7 +682,7 @@ static void WriteCSV(SCStudyInterfaceRef& sc, const char* Evt, const char* Side,
               "%d,%d,%.0f,%.2f,"
               "%.2f,%s,%d,%.2f,%.2f,"
               "%.2f,%.2f,%d,%d,"
-              "%.2f,%d,%d,%d,v12.37,%llu\n",
+              "%.2f,%d,%d,%d,v12.38,%llu\n",
         Y,Mo,D,Hr,Mi,Se,Evt,Side,Mode,Entry,SL,TP1,TP2,Qty,Score,
         CtrlSc,DivStr,Delta,BarSpd,
         ExitPx,ExitR,Hold,MAE,MFE,
@@ -3645,11 +3659,13 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
     int edgeScore  = (pFade && pFade->active) ? pFade->edgeScore : 0;
     int qScore100  = V18A_QualityScore100(selMode, finalScore, edgeScore, pFade && pFade->active);
 
-    if(qScore100 < V18A_QUALITY_FLOOR){
+    // [v12.38] M8 (selMode==7) uses a raised floor of 60; all other modes 50.
+    int effFloor = (selMode==7) ? V18A_QUALITY_FLOOR_M8 : V18A_QUALITY_FLOOR;
+    if(qScore100 < effFloor){
         if(DIAG&&LOG_LVL>=LOG_SIG&&Idx!=LastBlockLogBar){
             LastBlockLogBar=Idx;
             SCString m; m.Format("[V18A] Skip M%d %s — quality %d < floor %d (score=%d)",
-                selMode+1, selLong?"L":"S", qScore100, V18A_QUALITY_FLOOR, finalScore);
+                selMode+1, selLong?"L":"S", qScore100, effFloor, finalScore);
             sc.AddMessageToLog(m,0);
         }
         return;

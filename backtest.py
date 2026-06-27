@@ -159,6 +159,18 @@ DISABLE_MODES = set()        # mode indices (per MODE_NAMES) to suppress, e.g. {
 # S7/S8/S10/S11) is NOT modelable here — backtest.py's score is a 5-bar delta
 # count, not the cpp's 12-signal sum, so those sub-signals were never present.
 V13_MODEL    = False
+# [v18 M8 port] Mirror the LIVE cpp M8 "Fade Engine" in full. backtest.py only
+# ever modeled fade type-1 (balance-breakout fade), which is structurally
+# near-dead — type-1's bkVerifyScore<=4 gate requires a confirmed *bullish*
+# breakout bar (Close>hi+bkT, bull) on the same bar its fade geometry needs a
+# *bearish* reject (Close<hi+0.3bkT, bear): mutually exclusive, so bk_vs stays
+# 10 and the gate never opens (true in the cpp too). The fades that actually
+# fire live are type-2 (range/imbalance fade, cpp 3412-3432), type-3
+# (trend-exhaustion, cpp 3433-3461) and type-4 (absorption, cpp 3462-3486).
+# Setting this True ports types 2 + 4 and un-gates type 3 (otherwise V13_MODEL-
+# only), so M8 fires the way it does live. Default False → every existing
+# harness stays byte-identical; only backtest_m8_ab.py flips it on.
+M8_FADE_FULL = False
 TICK         = 0.25
 PT_VAL       = 20.0          # NQ: $20/point ($5/tick)
 COMMISSION   = 5.0           # RT per trade
@@ -1093,6 +1105,12 @@ class Backtester:
         self.prev_imb_dir   = 0
         self.prev_imb_str   = 0
         self.prev_imb_extreme = 0.0
+        # [v18 M8 port] isolated prev-imbalance state for the M8 type-2 fade,
+        # kept separate from the M7 path (ENABLE_M7-gated) so the two never
+        # interact. Updated every bar when M8_FADE_FULL.
+        self.m8_prev_imb_dir   = 0
+        self.m8_prev_imb_str   = 0
+        self.m8_prev_imb_extreme = 0.0
 
         # Spike / volume-cool state (mirrors C++ pNews + pVCool; NEWS_FILTER gated)
         self.spike_bar       = -1
@@ -1537,6 +1555,58 @@ class Backtester:
             m7l = m7s = False
             m7_stop = 0.0
 
+        # [v18 M8 port] Maintain prev-imbalance state + rvVerifyScore for the M8
+        # type-2 range fade, independent of M7 (ENABLE_M7-gated, default off).
+        # Mirrors cpp IOF_NQ_Autopilot.cpp:3317-3371 (M7 firing removed in
+        # v12.25 but rvVerifyScore still feeds M8 type-2). Self-contained state.
+        rv_vs_m8 = 8
+        if M8_FADE_FULL:
+            if imb.active:
+                self.m8_prev_imb_dir = imb.direction
+                self.m8_prev_imb_str = imb.strength
+                self.m8_prev_imb_extreme = bar.high if imb.direction > 0 else bar.low
+            if self.m8_prev_imb_dir != 0 and atr > 0:
+                imb_fading = imb.active and imb.strength < self.m8_prev_imb_str - 1
+                imb_dead   = (not imb.active) and self.m8_prev_imb_str >= 3
+                if imb_fading or imb_dead:
+                    rv_vs_m8 = 0
+                    rev_dir = -1 if self.m8_prev_imb_dir > 0 else +1
+                    # 1. delta exhaustion (decreasing |delta| over last 3 bars)
+                    if i >= 2:
+                        dm0 = abs(dlt)
+                        dm1 = abs(self.bars[i-1].ask_vol - self.bars[i-1].bid_vol)
+                        dm2 = abs(self.bars[i-2].ask_vol - self.bars[i-2].bid_vol)
+                        if dm0 < dm1 < dm2: rv_vs_m8 += 1
+                    # 2. prev-imb extreme at a structural level (VB2 / VP)
+                    at_lev = False
+                    if self.m8_prev_imb_dir > 0 and vb2u > 0 and self.m8_prev_imb_extreme >= vb2u - atr * 0.3:
+                        at_lev = True
+                    if self.m8_prev_imb_dir < 0 and vb2l > 0 and self.m8_prev_imb_extreme <= vb2l + atr * 0.3:
+                        at_lev = True
+                    if self.vp.valid:
+                        for lv in (self.vp.poc, self.vp.vah, self.vp.val):
+                            if lv > 0 and abs(self.m8_prev_imb_extreme - lv) <= atr * 0.5:
+                                at_lev = True; break
+                    if at_lev: rv_vs_m8 += 1
+                    # 3. aggression flip on current bar
+                    avgd = self.avg_d[i] if i < len(self.avg_d) else max(1.0, abs(dlt))
+                    if rev_dir > 0 and dlt > 0 and abs(dlt) > avgd * 1.5: rv_vs_m8 += 1
+                    if rev_dir < 0 and dlt < 0 and abs(dlt) > avgd * 1.5: rv_vs_m8 += 1
+                    # 4. body in reversal direction (cpp uses >=0.62)
+                    rng = bar.high - bar.low
+                    bpct = (abs(bar.close - bar.open) / rng) if rng > 0 else 0.0
+                    corr = bull if rev_dir > 0 else bear
+                    if bpct >= 0.62 and corr: rv_vs_m8 += 1
+                    # 5. trap confluence
+                    if self.trap.phase >= 2: rv_vs_m8 += 1
+                    # 6. divergence supports reversal
+                    if rev_dir > 0 and div.strength >= 2: rv_vs_m8 += 1
+                    if rev_dir < 0 and div.strength <= -2: rv_vs_m8 += 1
+                    # 7. volume burst
+                    if bal.avg_vol > 0 and bar.volume > bal.avg_vol * 1.8: rv_vs_m8 += 1
+                    # 8. no counter-iceberg — granted free (no iceberg detection)
+                    rv_vs_m8 += 1
+
         # M8 — Fade (balance breakout fade, type 1)
         # [v13] Under V13_MODEL the trap edge term is dropped (v13 removed the
         # trap subsystem); baseline keeps it. Type-3 trend-exhaustion fade below
@@ -1562,9 +1632,31 @@ class Backtester:
                     fd_sp = bar.low - atr * 0.3
                     fd_t1 = bal.poc; fd_t2 = bal.hi
 
+        # [v18 M8 port] M8 type 2 — range / imbalance fade. cpp 3412-3432.
+        # Fires on a WEAK (rvVerifyScore 2-4) faded imbalance and fades it in the
+        # imbalance's *original* direction. This is the fade type that fired LIVE
+        # 2026-06-26 (two SHORT M8 Q=50 => edgeScore 5). M8_FADE_FULL-gated.
+        if M8_FADE_FULL and not m6l and not m6s and not m8l and not m8s \
+           and 2 <= rv_vs_m8 <= 4 and self.m8_prev_imb_dir != 0 and atr > 0:
+            edge = 2 if rv_vs_m8 <= 3 else 1
+            if self.m8_prev_imb_dir > 0 and div.strength >= 0: edge += 2
+            if self.m8_prev_imb_dir < 0 and div.strength <= 0: edge += 2
+            if self.trap.phase < 2: edge += 1
+            if edge >= 4:
+                if self.m8_prev_imb_dir > 0:
+                    m8l = True; fade_active = True; fade_type = 2; fade_edge = edge
+                    fd_sp = min(bar.low, self.m8_prev_imb_extreme) - atr * 0.3
+                    fd_t1 = self.m8_prev_imb_extreme + atr * 0.5
+                    fd_t2 = self.m8_prev_imb_extreme + atr * 1.5
+                else:
+                    m8s = True; fade_active = True; fade_type = 2; fade_edge = edge
+                    fd_sp = max(bar.high, self.m8_prev_imb_extreme) + atr * 0.3
+                    fd_t1 = self.m8_prev_imb_extreme - atr * 0.5
+                    fd_t2 = self.m8_prev_imb_extreme - atr * 1.5
+
         # [v13] M8 type 3 — trend-exhaustion fade. Ported from the v13 cpp
-        # (= v12.37 cpp lines 3433-3461). Only active under V13_MODEL.
-        if V13_MODEL and not m6l and not m6s and not m8l and not m8s and i >= 8 and atr > 0:
+        # (= v12.37 cpp lines 3433-3461). Active under V13_MODEL or M8_FADE_FULL.
+        if (V13_MODEL or M8_FADE_FULL) and not m6l and not m6s and not m8l and not m8s and i >= 8 and atr > 0:
             trend_bars = sum(1 if self.bars[i-k].close > self.bars[i-k].open else -1
                              for k in range(8))
             up_t = trend_bars >= 4
@@ -1594,6 +1686,35 @@ class Backtester:
                         fd_sp = bar.low - atr * 0.4
                         fd_t1 = bar.close + atr * 1.0
                         fd_t2 = vwap if vwap > 0 else (bar.close + atr * 2.0)
+
+        # [v18 M8 port] M8 type 4 — absorption fade. cpp 3462-3486. Fades a
+        # persistent price/delta divergence (up-price/down-delta => short) when
+        # it stalls at a structural level. M8_FADE_FULL-gated. Note Python's
+        # div.persist_abs_sell == cpp persistUpPxDnDelta>=3 (up_dn>=3) and
+        # div.persist_abs_buy == cpp persistDnPxUpDelta>=3.
+        if M8_FADE_FULL and not m6l and not m6s and not m8l and not m8s and atr > 0:
+            abs_up = div.persist_abs_sell   # up price / down delta (bearish absorption)
+            abs_dn = div.persist_abs_buy    # down price / up delta (bullish absorption)
+            if abs_up or abs_dn:
+                abs_e = 3
+                at_k = False
+                if self.vp.valid:
+                    for lv in (self.vp.poc, self.vp.vah, self.vp.val):
+                        if lv > 0 and abs(bar.close - lv) <= atr * 0.5: at_k = True
+                if vwap > 0 and abs(bar.close - vwap) <= atr * 0.5: at_k = True
+                if at_k: abs_e += 2
+                if abs_up and div.trend_div_bear: abs_e += 2
+                if abs_dn and div.trend_div_bull: abs_e += 2
+                if self.trap.phase >= 2: abs_e += 2
+                if abs_e >= 6:
+                    if abs_up:
+                        m8s = True; fade_active = True; fade_type = 4; fade_edge = abs_e
+                        fd_sp = bar.high + atr * 0.35
+                        fd_t1 = bar.close - atr * 0.75; fd_t2 = bar.close - atr * 2.0
+                    elif abs_dn:
+                        m8l = True; fade_active = True; fade_type = 4; fade_edge = abs_e
+                        fd_sp = bar.low - atr * 0.35
+                        fd_t1 = bar.close + atr * 0.75; fd_t2 = bar.close + atr * 2.0
 
         # [v12.25] M8 strict CtrlScore gate. Fades require neutral/correct-side flow.
         if m8l and ctrl < 0:
