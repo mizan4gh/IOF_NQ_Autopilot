@@ -171,6 +171,10 @@ V13_MODEL    = False
 # only), so M8 fires the way it does live. Default False → every existing
 # harness stays byte-identical; only backtest_m8_ab.py flips it on.
 M8_FADE_FULL = False
+# Per-fade-type enable filter (only meaningful when M8_FADE_FULL). Lets an A/B
+# suppress individual M8 fade types, e.g. {1,3,4} to drop the Imb-corrupted
+# type-2, or {4} for type-4-only. Default = all four → no behavior change.
+M8_FADE_TYPES = {1, 2, 3, 4}
 TICK         = 0.25
 PT_VAL       = 20.0          # NQ: $20/point ($5/tick)
 COMMISSION   = 5.0           # RT per trade
@@ -1611,7 +1615,7 @@ class Backtester:
         # [v13] Under V13_MODEL the trap edge term is dropped (v13 removed the
         # trap subsystem); baseline keeps it. Type-3 trend-exhaustion fade below
         # is V13_MODEL-only (backtest.py never modeled it for the v12.37 proxy).
-        if not m6l and not m6s and bal.mature and atr > 0 and bk_vs <= 4:
+        if 1 in M8_FADE_TYPES and not m6l and not m6s and bal.mature and atr > 0 and bk_vs <= 4:
             bk_t = atr * 0.30
             if bar.high > bal.hi + bk_t * 0.5 and bar.close < bal.hi + bk_t * 0.3 and bear:
                 edge = 1
@@ -1636,7 +1640,7 @@ class Backtester:
         # Fires on a WEAK (rvVerifyScore 2-4) faded imbalance and fades it in the
         # imbalance's *original* direction. This is the fade type that fired LIVE
         # 2026-06-26 (two SHORT M8 Q=50 => edgeScore 5). M8_FADE_FULL-gated.
-        if M8_FADE_FULL and not m6l and not m6s and not m8l and not m8s \
+        if M8_FADE_FULL and 2 in M8_FADE_TYPES and not m6l and not m6s and not m8l and not m8s \
            and 2 <= rv_vs_m8 <= 4 and self.m8_prev_imb_dir != 0 and atr > 0:
             edge = 2 if rv_vs_m8 <= 3 else 1
             if self.m8_prev_imb_dir > 0 and div.strength >= 0: edge += 2
@@ -1656,7 +1660,7 @@ class Backtester:
 
         # [v13] M8 type 3 — trend-exhaustion fade. Ported from the v13 cpp
         # (= v12.37 cpp lines 3433-3461). Active under V13_MODEL or M8_FADE_FULL.
-        if (V13_MODEL or M8_FADE_FULL) and not m6l and not m6s and not m8l and not m8s and i >= 8 and atr > 0:
+        if (V13_MODEL or M8_FADE_FULL) and 3 in M8_FADE_TYPES and not m6l and not m6s and not m8l and not m8s and i >= 8 and atr > 0:
             trend_bars = sum(1 if self.bars[i-k].close > self.bars[i-k].open else -1
                              for k in range(8))
             up_t = trend_bars >= 4
@@ -1692,7 +1696,7 @@ class Backtester:
         # it stalls at a structural level. M8_FADE_FULL-gated. Note Python's
         # div.persist_abs_sell == cpp persistUpPxDnDelta>=3 (up_dn>=3) and
         # div.persist_abs_buy == cpp persistDnPxUpDelta>=3.
-        if M8_FADE_FULL and not m6l and not m6s and not m8l and not m8s and atr > 0:
+        if M8_FADE_FULL and 4 in M8_FADE_TYPES and not m6l and not m6s and not m8l and not m8s and atr > 0:
             abs_up = div.persist_abs_sell   # up price / down delta (bearish absorption)
             abs_dn = div.persist_abs_buy    # down price / up delta (bullish absorption)
             if abs_up or abs_dn:
