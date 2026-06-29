@@ -175,6 +175,15 @@ M8_FADE_FULL = False
 # suppress individual M8 fade types, e.g. {1,3,4} to drop the Imb-corrupted
 # type-2, or {4} for type-4-only. Default = all four → no behavior change.
 M8_FADE_TYPES = {1, 2, 3, 4}
+# [trend-long prototype] VWAP-reclaim-and-go long. Flag-gated, default OFF so
+# every existing harness stays byte-identical. Rides the (disabled) M5 slot so
+# it plugs into the cascade/qual/enter pipeline without a new mode index —
+# requires ENABLE_M5=False (the default). See backtest_trend_long_ab.py.
+TREND_LONG     = False
+TREND_VWAP_LB  = 6      # bars to look back for "price was below VWAP"
+TREND_T1_ATR   = 1.5
+TREND_T2_ATR   = 4.0    # wide T2 so a trend winner can run (exit trail caps it)
+TREND_STOP_BUF = 0.25   # swing-low stop buffer, in ATR
 TICK         = 0.25
 PT_VAL       = 20.0          # NQ: $20/point ($5/tick)
 COMMISSION   = 5.0           # RT per trade
@@ -1081,6 +1090,8 @@ class Backtester:
         self.is_long    = False
         self.entry_px   = 0.0
         self.stop_px    = 0.0
+        self._tr_stop   = 0.0   # [trend-long] swing-low stop, set at arm time
+        self._tr_q      = 0     # [trend-long] custom quality 0..100, set at arm time
         self.tp1_px     = 0.0
         self.tp2_px     = 0.0
         self.entry_bar  = -1
@@ -1726,6 +1737,32 @@ class Backtester:
         if m8s and ctrl > 0:
             m8s = False; fade_active = False; fade_edge = 0; fade_type = 0
 
+        # ── [trend-long prototype] VWAP-reclaim-and-go (rides the M5 slot) ─────
+        # Catches V-reversal trend days the fade modes miss (e.g. 2026-06-29
+        # 29,300→30,050). LONG when price was below VWAP over the last
+        # TREND_VWAP_LB bars, reclaims it THIS bar (prev close < VWAP < close)
+        # with net-buyer delta and a bull body. Sets m5l so the existing
+        # cascade/qual/enter pipeline carries it; _tr_stop (swing-low stop) and
+        # _tr_q (custom quality) are read downstream. Long-only by design.
+        self._tr_stop = 0.0; self._tr_q = 0
+        if TREND_LONG and vwap > 0 and atr > 0 and i >= TREND_VWAP_LB \
+           and not (m6l or m6s or m8l or m8s or m4l or m4s):
+            tprev_c = self.bars[i-1].close
+            below_recent = sum(1 for k in range(1, TREND_VWAP_LB + 1)
+                               if self.bars[i-k].close < vwap)
+            reclaim = tprev_c < vwap and bar.close > vwap
+            tdelta  = bar.ask_vol - bar.bid_vol
+            avgd    = self.avg_d[i] if i < len(self.avg_d) else max(1.0, abs(tdelta))
+            if below_recent >= 2 and reclaim and tdelta > 0 and bull:
+                m5l = True
+                swlo = min(bar.low, self.bars[i-1].low)
+                self._tr_stop = round((swlo - atr * TREND_STOP_BUF) / TICK) * TICK
+                qtr = 50
+                if abs(tdelta) > avgd:               qtr += 10  # strong buyer aggression
+                if (bar.close - vwap) > atr * 0.15:  qtr += 10  # decisive reclaim
+                if bar.close > bar.open:             qtr += 10  # bull body
+                self._tr_q = qtr
+
         # ── [instrumentation] per-mode arm counts (before downstream gates) ────
         for _mi, _ll, _ss in ((0, m1l, m1s), (1, m2l, m2s), (2, m3l, m3s),
                               (3, m4l, m4s), (4, m5l, m5s), (5, m6l, m6s),
@@ -1911,6 +1948,8 @@ class Backtester:
         else:
             final_sc = sc_l if sl else sc_s
         q = qual100(sel, final_sc, fade_edge, fade_active)
+        if sel == 4 and TREND_LONG and self._tr_q:   # [trend-long] use custom quality
+            q = self._tr_q
         if sel == 0 and QUAL_FLOOR_M1 is not None:
             floor = QUAL_FLOOR_M1
         elif sel == 1 and QUAL_FLOOR_M2 is not None:
@@ -1978,6 +2017,10 @@ class Backtester:
             sp, t1, t2 = m6_sp, m6_t1, m6_t2
         elif sel == 7 and fade_active:
             sp, t1, t2 = fd_sp, fd_t1, fd_t2
+        elif sel == 4 and TREND_LONG and self._tr_stop:   # [trend-long] swing-low stop, wide ATR targets
+            sp = self._tr_stop
+            t1 = round((ep + atr * TREND_T1_ATR) / TICK) * TICK
+            t2 = round((ep + atr * TREND_T2_ATR) / TICK) * TICK
         else:
             stop_cl = C_STOP_CL
             if STOP_MODEL == "wide_for_hiconv" and (score >= 7 or sel == 1):
