@@ -184,6 +184,10 @@ TREND_VWAP_LB  = 6      # bars to look back for "price was below VWAP"
 TREND_T1_ATR   = 1.5
 TREND_T2_ATR   = 4.0    # wide T2 so a trend winner can run (exit trail caps it)
 TREND_STOP_BUF = 0.25   # swing-low stop buffer, in ATR
+TREND_MIN_TS   = 0.5    # [trend filter] require trend-strength (delta flow) >= this
+                        # (0.5 = data-calibrated 2026-06-29; ts weakly separates
+                        # win/loss so treat as marginal, validate out-of-sample)
+TREND_MAX_CHOP = 1      # [trend filter] skip reclaims when chop regime cr > this
 TICK         = 0.25
 PT_VAL       = 20.0          # NQ: $20/point ($5/tick)
 COMMISSION   = 5.0           # RT per trade
@@ -1052,6 +1056,7 @@ class Trade:
     day_pnl: float = 0; tot_pnl: float = 0
     fade_edge: int = 0; fade_type: int = 0; risk_mult: float = 1.0
     trend_reg: int = 0; vol_reg: int = 1; chop_reg: int = 0
+    trend_ts: float = 0.0   # [trend-long instrumentation] trend-strength at arm (M5 only)
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  BACKTESTER
@@ -1092,6 +1097,8 @@ class Backtester:
         self.stop_px    = 0.0
         self._tr_stop   = 0.0   # [trend-long] swing-low stop, set at arm time
         self._tr_q      = 0     # [trend-long] custom quality 0..100, set at arm time
+        self._tr_ts     = 0.0   # [trend-long instrumentation] trend-strength at arm
+        self._tr_cr     = 0     # [trend-long instrumentation] chop regime at arm
         self.tp1_px     = 0.0
         self.tp2_px     = 0.0
         self.entry_bar  = -1
@@ -1320,6 +1327,7 @@ class Backtester:
         m1l = m1s = False
         m2l = m2s = m3l = m3s = m4l = m4s = False
         m5l = m5s = False                # [v12.20 port-back]
+        trl = False                      # [trend-long] lowest-priority VWAP-reclaim long
         m6l = m6s = m8l = m8s = False
         m7l = m7s = False                # [v12.20 port-back]
         m7_stop = 0.0
@@ -1741,10 +1749,12 @@ class Backtester:
         # Catches V-reversal trend days the fade modes miss (e.g. 2026-06-29
         # 29,300→30,050). LONG when price was below VWAP over the last
         # TREND_VWAP_LB bars, reclaims it THIS bar (prev close < VWAP < close)
-        # with net-buyer delta and a bull body. Sets m5l so the existing
-        # cascade/qual/enter pipeline carries it; _tr_stop (swing-low stop) and
-        # _tr_q (custom quality) are read downstream. Long-only by design.
-        self._tr_stop = 0.0; self._tr_q = 0
+        # with net-buyer delta and a bull body. Sets `trl` (a dedicated
+        # LOWEST-priority flag, mapped to sel=4 at the bottom of the cascade) so
+        # it never preempts a real M1/M4 signal — only fires when nothing else
+        # armed. _tr_stop (swing-low stop) and _tr_q (custom quality) are read
+        # downstream. Long-only by design.
+        self._tr_stop = 0.0; self._tr_q = 0; self._tr_ts = 0.0; self._tr_cr = 0
         if TREND_LONG and vwap > 0 and atr > 0 and i >= TREND_VWAP_LB \
            and not (m6l or m6s or m8l or m8s or m4l or m4s):
             tprev_c = self.bars[i-1].close
@@ -1754,14 +1764,21 @@ class Backtester:
             tdelta  = bar.ask_vol - bar.bid_vol
             avgd    = self.avg_d[i] if i < len(self.avg_d) else max(1.0, abs(tdelta))
             if below_recent >= 2 and reclaim and tdelta > 0 and bull:
-                m5l = True
-                swlo = min(bar.low, self.bars[i-1].low)
-                self._tr_stop = round((swlo - atr * TREND_STOP_BUF) / TICK) * TICK
-                qtr = 50
-                if abs(tdelta) > avgd:               qtr += 10  # strong buyer aggression
-                if (bar.close - vwap) > atr * 0.15:  qtr += 10  # decisive reclaim
-                if bar.close > bar.open:             qtr += 10  # bull body
-                self._tr_q = qtr
+                # [trend filter] only fire when there's real trend behind the
+                # reclaim — strong delta flow and not a chop regime. Cuts the
+                # low-quality bull-trap reclaims that lost on NQZ25/NQH6.
+                ts_tr = self._trend_str(i, atr)
+                _, cr_tr = self._regime(i, atr, vwap)
+                self._tr_ts = ts_tr; self._tr_cr = cr_tr   # instrument every reclaim
+                if ts_tr >= TREND_MIN_TS and cr_tr <= TREND_MAX_CHOP:
+                    trl = True
+                    swlo = min(bar.low, self.bars[i-1].low)
+                    self._tr_stop = round((swlo - atr * TREND_STOP_BUF) / TICK) * TICK
+                    qtr = 50
+                    if abs(tdelta) > avgd:               qtr += 10  # strong buyer aggression
+                    if (bar.close - vwap) > atr * 0.15:  qtr += 10  # decisive reclaim
+                    if bar.close > bar.open:             qtr += 10  # bull body
+                    self._tr_q = qtr
 
         # ── [instrumentation] per-mode arm counts (before downstream gates) ────
         for _mi, _ll, _ss in ((0, m1l, m1s), (1, m2l, m2s), (2, m3l, m3s),
@@ -1889,6 +1906,7 @@ class Backtester:
         elif m2s: sel = 1
         elif m1l: sel = 0; sl = True
         elif m1s: sel = 0
+        elif trl: sel = 4; sl = True   # [trend-long] lowest priority — never preempts M1/M4
         if sel < 0: return
 
         _mname = ("M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8")[sel]
@@ -2109,6 +2127,7 @@ class Backtester:
             fade_type  = fade_type,
             day_pnl    = round(self.day_pnl, 2),
             tot_pnl    = round(self.tot_pnl, 2),
+            trend_ts   = round(self._tr_ts, 3) if sel == 4 else 0.0,
         )
         self.cur_trade = t
         self.out.append(t)
@@ -2383,7 +2402,7 @@ CSV_FIELDS = [
     "Date","Time","Event","Side","Mode","Entry","SL","TP1","TP2","Qty","Score",
     "CtrlScore","DivStr","Delta","BarSpeed","ExitPx","ExitReason","HoldBars",
     "MAE","MFE","DayPnL","TotalPnL","FadeEdge","FadeType","RiskMult",
-    "TrendReg","VolReg","ChopReg","Version",
+    "TrendReg","VolReg","ChopReg","Version","TrendTS",
 ]
 
 def write_csv(trades: List[Trade], path: str):
@@ -2403,7 +2422,7 @@ def write_csv(trades: List[Trade], path: str):
                 "FadeEdge": t.fade_edge, "FadeType": t.fade_type,
                 "RiskMult": t.risk_mult, "TrendReg": t.trend_reg,
                 "VolReg": t.vol_reg, "ChopReg": t.chop_reg,
-                "Version": "v12.25-py",
+                "Version": "v12.25-py", "TrendTS": t.trend_ts,
             })
 
 # ─────────────────────────────────────────────────────────────────────────────
