@@ -24,7 +24,10 @@ OUT = BASE / "live_pnl.csv"
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--since", default="1900-01-01", help="only keep dates >= this")
-    ap.add_argument("--source", default=str(SC_DATA / "IOF_NQ_F.US.E*.csv"),
+    # match all NQ strategy CSVs across symbol notations (F.US.ENQU26, NQU6.CME,
+    # etc.) — the *NQ* after the IOF_NQ_ prefix excludes the ES file. History is
+    # split across notations as the chart symbol changes over contract rolls.
+    ap.add_argument("--source", default=str(SC_DATA / "IOF_NQ_*NQ*.csv"),
                     help="glob for strategy CSV(s)")
     a = ap.parse_args()
 
