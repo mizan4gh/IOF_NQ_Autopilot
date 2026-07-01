@@ -72,3 +72,7 @@ ci_control_backtest_pnl.csv
 trl_*.txt
 flr6_*.txt
 m8*_ab.txt
+
+# Live realized-P&L series (personal; generated daily by pnl_logger.py) + its log
+live_pnl.csv
+pnl_logger.log
