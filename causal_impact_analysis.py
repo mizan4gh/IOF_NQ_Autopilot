@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 
 BASE = Path(__file__).parent
-DEPLOY_DEFAULT = "2026-07-05"
+DEPLOY_DEFAULT = "2026-06-29"   # floor-60 (v12.38) confirmed live from this date
 MIN_POST = 15   # minimum post-period trading days for a credible estimate
 MIN_PRE = 30
 
