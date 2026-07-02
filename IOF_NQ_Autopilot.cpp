@@ -1504,7 +1504,7 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
         //    Quantity           : 1
         //    Daily Loss $       : 800         (= one 40pt stop; 5-day cushion)
         //    Daily Profit $     : 0 (off)     (don't truncate right-tail days)
-        //    Max Trades         : 3
+        //    Max Trades         : 1           (1pd config 2026-07-02; DL=800 kept as misconfig insurance)
         //    News Filter        : 1 (ON)
         //    Entry Order        : 2 (lmt+2t)
         //    Session Start      : 0 (RTH only)
@@ -1538,7 +1538,7 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
         IN_LIVE.Name="Enable Auto Trading (1=live orders)"; IN_LIVE.SetInt(1);
         IN_CAPITAL.Name="Account Capital ($)"; IN_CAPITAL.SetFloat(150000.0f);  // [v12.24] Apex $150K eval
         IN_DAILY_LOSS.Name="Daily Loss $ (drives risk budget)"; IN_DAILY_LOSS.SetFloat(800.f);  // Apex $150K eval: $800/day caps you at ~5 stop-out days before liquidation
-        IN_MAX_TRADES.Name="Max Trades/Day"; IN_MAX_TRADES.SetInt(3);  // [v12.24] Apex eval: 3 trades caps the day after at most ~2 stops
+        IN_MAX_TRADES.Name="Max Trades/Day"; IN_MAX_TRADES.SetInt(1);  // [2026-07-02] 1pd config: MT=1 + DL=800 byte-identical to validated 1pd/no-caps on 3 frozen contracts; cap stays as misconfig insurance
         IN_FLAT_TIME.Name="Flatten HHMM"; IN_FLAT_TIME.SetInt(iof_unified::kDefaultFlattenHhmm);
         IN_TOTQTY.Name="Max Position Size (1 lot only)"; IN_TOTQTY.SetInt(1); IN_TOTQTY.SetIntLimits(1, 1);
         IN_LOG_LVL.Name="Log Level (0=crit,1=sig,2=dbg)"; IN_LOG_LVL.SetInt(1); IN_LOG_LVL.SetIntLimits(0,2);
