@@ -188,6 +188,19 @@ TREND_MIN_TS   = 0.5    # [trend filter] require trend-strength (delta flow) >= 
                         # (0.5 = data-calibrated 2026-06-29; ts weakly separates
                         # win/loss so treat as marginal, validate out-of-sample)
 TREND_MAX_CHOP = 1      # [trend filter] skip reclaims when chop regime cr > this
+# [trend iter-2] Mechanistic bull-trap defenses (2026-07-02). Both default OFF →
+# byte-identical baseline. See backtest_trend_iter2_ab.py.
+#   TREND_FAIL_EXIT — exit a pre-T1 trend-long at market ("TFAIL") when price
+#     closes back below VWAP by >= 0.10*ATR. The mode's thesis IS the reclaim;
+#     a close back under VWAP invalidates it, so don't ride to the wide
+#     swing-low stop. Targets the trap-loss tail (full stop = large loss).
+#   TREND_MIN_DEPTH — require a genuine V-shape before entry: some close within
+#     the last TREND_DEPTH_LB bars must be >= TREND_MIN_DEPTH*ATR below the
+#     current VWAP. Shallow-dip reclaims are chop crossings, not V-reversals.
+TREND_FAIL_EXIT = False
+TREND_FAIL_BUF  = 0.10  # ATR buffer below VWAP before TFAIL triggers
+TREND_MIN_DEPTH = 0.0   # ATR units; 0.0 = off
+TREND_DEPTH_LB  = 20    # bars scanned for the below-VWAP excursion depth
 TICK         = 0.25
 PT_VAL       = 20.0          # NQ: $20/point ($5/tick)
 COMMISSION   = 5.0           # RT per trade
@@ -1763,7 +1776,14 @@ class Backtester:
             reclaim = tprev_c < vwap and bar.close > vwap
             tdelta  = bar.ask_vol - bar.bid_vol
             avgd    = self.avg_d[i] if i < len(self.avg_d) else max(1.0, abs(tdelta))
-            if below_recent >= 2 and reclaim and tdelta > 0 and bull:
+            # [trend iter-2] V-depth gate: demand a real excursion below VWAP
+            # (not a chop crossing) before a reclaim counts. Off at depth 0.0.
+            depth_ok = True
+            if TREND_MIN_DEPTH > 0.0:
+                lb_d = min(TREND_DEPTH_LB, i)
+                lo_c = min(self.bars[i - k].close for k in range(1, lb_d + 1))
+                depth_ok = lo_c <= vwap - atr * TREND_MIN_DEPTH
+            if below_recent >= 2 and reclaim and tdelta > 0 and bull and depth_ok:
                 # [trend filter] only fire when there's real trend behind the
                 # reclaim — strong delta flow and not a chop regime. Cuts the
                 # low-quality bull-trap reclaims that lost on NQZ25/NQH6.
@@ -2102,6 +2122,8 @@ class Backtester:
         self.qty       = self._lot_count()
         self.lots_open = self.qty
         self._realized = 0.0
+        # [trend iter-2] mark trend-long positions so _manage can apply TFAIL
+        self._is_trend = (sel == 4 and TREND_LONG and bool(self._tr_stop))
 
         t = Trade(
             date       = bar.dt.strftime("%Y-%m-%d"),
@@ -2196,6 +2218,17 @@ class Backtester:
                 else:
                     self.stop_px = round((self.entry_px - buf) / TICK) * TICK
 
+        # [trend iter-2] TFAIL — reclaim-failed exit for trend-longs. The mode's
+        # thesis is "price reclaimed VWAP"; a close back below VWAP (minus a
+        # small ATR buffer) pre-T1 invalidates it. Exit at market instead of
+        # riding to the wide swing-low stop. Runs after the T1 checks so a
+        # same-bar T1 touch wins; before early-scratch (more specific signal).
+        if TREND_FAIL_EXIT and not self.t1_hit and i > self.entry_bar \
+           and getattr(self, "_is_trend", False):
+            vw = self.vwap_v[i] if i < len(self.vwap_v) else 0.0
+            if vw > 0 and bar.close < vw - atr * TREND_FAIL_BUF:
+                self._close(i, bar.close, "TFAIL"); return
+
         # [early-scratch] see flag block; runs after T1 check so a same-bar
         # T1 touch wins, before the stop becomes eligible at entry+4.
         if EARLY_SCRATCH and not self.t1_hit and i == self.entry_bar + ES_AT_BAR:
@@ -2248,7 +2281,7 @@ class Backtester:
         self.day_pnl += pnl
         self.tot_pnl += pnl
 
-        if pnl < 0 and reason in ("STOP", "CB", "TRAIL", "SCRATCH"):
+        if pnl < 0 and reason in ("STOP", "CB", "TRAIL", "SCRATCH", "TFAIL"):
             self.last_stop_bar = i
             self.last_stop_dir = 1 if il else -1
         if pnl < 0: self.last_loss_bar = i
