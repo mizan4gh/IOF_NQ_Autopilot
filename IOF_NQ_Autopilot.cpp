@@ -1502,7 +1502,7 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
         //
         //  ─── PHASE 1 — DEFAULTS BELOW (balance < $153K) ─────────────────────
         //    Quantity           : 1
-        //    Daily Loss $       : 1000        (allows ~2 stops; 5-day cushion)
+        //    Daily Loss $       : 800         (= one 40pt stop; 5-day cushion)
         //    Daily Profit $     : 0 (off)     (don't truncate right-tail days)
         //    Max Trades         : 3
         //    News Filter        : 1 (ON)
@@ -1549,7 +1549,7 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
         IN_FADE_ENABLE.Name="Fade Engine (0=off)"; IN_FADE_ENABLE.SetInt(1);
         IN_NEWS_FILTER.Name="News Filter (0=off)"; IN_NEWS_FILTER.SetInt(1);   // [v12.24] Apex eval: ON — protect cushion from 08:30/10:00/14:00 ET spikes
         IN_AUTO_DISABLE.Name="Auto-disable bad modes (0=off)"; IN_AUTO_DISABLE.SetInt(1);
-        IN_DAILY_PROF.Name="Daily Profit Target $ (0=disabled)"; IN_DAILY_PROF.SetFloat(1000.f);  // Apex eval: lock in +$1000 day, halt and flatten
+        IN_DAILY_PROF.Name="Daily Profit Target $ (0=disabled)"; IN_DAILY_PROF.SetFloat(0.f);  // [v12.38] OFF — validated config; profit cap truncates the M6 outlier days that fund PF (see DO-NOT table above; sweep 2026-06-05 = no-op-to-harmful)
         IN_M1_ENABLE.Name="Enable M1 VWAP Reclaim"; IN_M1_ENABLE.SetInt(1);   // [v12.23] default ON
         IN_M1_PULLBACK.Name="M1 Pullback Mode (0=off,1=wick,2=dip)"; IN_M1_PULLBACK.SetInt(2);  // [v12.34] default=2 dip+reclaim (cross-contract A/B passed 2026-05-22). 1=wick-reject (failed A/B).
         IN_SESSION_START.Name="Session Start HHMM (0=RTH 09:35, 100=01:00 ET)"; IN_SESSION_START.SetInt(0);  // [v12.24] RTH only — overnight session unvalidated
