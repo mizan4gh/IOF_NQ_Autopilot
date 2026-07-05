@@ -55,7 +55,21 @@ def _prep(path):
     ask   = recs["high"].astype(np.float64)
     bvol  = recs["bid_vol"].astype(np.int64)
     avol  = recs["ask_vol"].astype(np.int64)
+    tvol  = recs["tot_vol"].astype(np.int64)
     rth, date_tag = rth_mask_and_days(t)
+
+    # RTH-anchored session VWAP (per local date), for the --vwap gate
+    vwap = np.full(len(t), np.nan)
+    ri = np.where(rth)[0]
+    if len(ri):
+        dts = date_tag[ri]
+        day_starts = np.where(np.diff(dts, prepend=dts[0] - 1) != 0)[0]
+        cpv, cv = np.cumsum(price[ri] * tvol[ri]), np.cumsum(tvol[ri])
+        for s_i, s in enumerate(day_starts):
+            e = day_starts[s_i + 1] if s_i + 1 < len(day_starts) else len(ri)
+            bpv = cpv[s - 1] if s > 0 else 0.0
+            bv  = cv[s - 1] if s > 0 else 0
+            vwap[ri[s:e]] = (cpv[s:e] - bpv) / np.maximum(cv[s:e] - bv, 1)
 
     cb, ca = np.cumsum(bvol), np.cumsum(avol)
     wb = window_sum(cb, t, IMB_WIN_MS * 1000)
@@ -70,15 +84,23 @@ def _prep(path):
     buy_sig  = big & (frac_buy >= IMB_MIN)
     sell_sig = big & (1 - frac_buy >= IMB_MIN)
 
-    # HHMM per tick for the late-entry gate (reuse rth day loop result cheaply)
-    out = (t, price, bid, ask, date_tag, buy_sig, sell_sig)
+    out = (t, price, bid, ask, date_tag, buy_sig, sell_sig, vwap)
     _CACHE.clear(); _CACHE[path] = out
     return out
 
 
-def run(path, hold_s=15, stop_ticks=10, verbose=True):
-    t, price, bid, ask, date_tag, buy_sig, sell_sig = _prep(path)
+def run(path, hold_s=15, stop_ticks=10, verbose=True, side_filter="both",
+        vwap_rel="any"):
+    t, price, bid, ask, date_tag, buy_sig, sell_sig, vwap = _prep(path)
     n = len(t)
+    if side_filter == "long":
+        sell_sig = np.zeros(n, bool)
+    elif side_filter == "short":
+        buy_sig = np.zeros(n, bool)
+    if vwap_rel != "any":
+        rel = (price > vwap) if vwap_rel == "above" else (price < vwap)
+        rel &= np.isfinite(vwap)
+        buy_sig, sell_sig = buy_sig & rel, sell_sig & rel
     cand = np.where(buy_sig | sell_sig)[0]
 
     trades = []
@@ -150,6 +172,8 @@ if __name__ == "__main__":
     ap.add_argument("--stop", default="10")
     ap.add_argument("--grid", action="store_true", help="hold x stop grid on one file (TRAIN)")
     ap.add_argument("--validate", action="store_true", help="fixed config on 3 contracts")
+    ap.add_argument("--side", choices=["both", "long", "short"], default="both")
+    ap.add_argument("--vwap", choices=["any", "above", "below"], default="any")
     args = ap.parse_args()
 
     if args.grid:
@@ -163,7 +187,8 @@ if __name__ == "__main__":
         stops = [int(x) for x in str(args.stop).split(",")]
         for f in VALIDATE_FILES:
             for h, s in zip(holds, stops):
-                run(os.path.join(base, f), hold_s=h, stop_ticks=s, verbose=False)
+                run(os.path.join(base, f), hold_s=h, stop_ticks=s, verbose=False,
+                    side_filter=args.side, vwap_rel=args.vwap)
     else:
         run(args.scid or "NQZ25-CME.scid", hold_s=float(args.hold),
             stop_ticks=int(args.stop))
