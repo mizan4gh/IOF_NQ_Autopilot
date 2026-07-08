@@ -110,7 +110,9 @@ QUAL_FLOOR_M1 = None  # if set, overrides QUAL_FLOOR for M1 (sel==0) only — us
 QUAL_FLOOR_M2 = None  # if set, overrides QUAL_FLOOR for M2 (sel==1) only — used by backtest_m2_qual25_ab.py
 QUAL_FLOOR_M3 = None  # if set, overrides QUAL_FLOOR for M3 (sel==2) only
 QUAL_FLOOR_M4 = None  # if set, overrides QUAL_FLOOR for M4 (sel==3) only — used by backtest_m4floor60_ab.py
+QUAL_FLOOR_M5 = None  # if set, overrides QUAL_FLOOR for M5 (sel==4) only — used by backtest_m5m7_floor_ab.py
 QUAL_FLOOR_M6 = None  # if set, overrides QUAL_FLOOR for M6 (sel==5) only
+QUAL_FLOOR_M7 = None  # if set, overrides QUAL_FLOOR for M7 (sel==6) only — used by backtest_m5m7_floor_ab.py
 QUAL_FLOOR_M8 = None  # if set, overrides QUAL_FLOOR for M8 (sel==7) only
 C_MIN_SC_M1  = 3
 C_MIN_SC_ALL = 3
@@ -1070,6 +1072,12 @@ class Trade:
     fade_edge: int = 0; fade_type: int = 0; risk_mult: float = 1.0
     trend_reg: int = 0; vol_reg: int = 1; chop_reg: int = 0
     trend_ts: float = 0.0   # [trend-long instrumentation] trend-strength at arm (M5 only)
+    # [regime-day instrumentation 2026-07-02] causal day-anchored features at
+    # entry, for the fade-day/trend-day classifier study (all modes, every entry):
+    day_ext_lo: float = 0.0  # (close - day_low)/ATR — rally off today's low
+    day_ext_hi: float = 0.0  # (day_high - close)/ATR — selloff off today's high
+    day_os:     float = 0.0  # one-sidedness: (bars above VWAP - below)/bars today
+    day_vws:    float = 0.0  # VWAP slope over last 20 bars (clamped to day), /ATR
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  BACKTESTER
@@ -1650,7 +1658,10 @@ class Backtester:
         if 1 in M8_FADE_TYPES and not m6l and not m6s and bal.mature and atr > 0 and bk_vs <= 4:
             bk_t = atr * 0.30
             if bar.high > bal.hi + bk_t * 0.5 and bar.close < bal.hi + bk_t * 0.3 and bear:
-                edge = 1
+                # v13 cpp starts edge at 2 for a very weak breakout (bkVerifyScore<=2,
+                # cpp v13 line 1496); v12.37 starts flat at 1. Without this, every
+                # v13 type-1 caps at edge 4 => q40 and dies at floor 50.
+                edge = 2 if (V13_MODEL and bk_vs <= 2) else 1
                 if div.strength <= -2: edge += 2
                 if div.persist_abs_sell: edge += 1
                 if not V13_MODEL and self.trap.phase >= 2 and self.trap.direction == +1: edge += 2
@@ -1659,7 +1670,7 @@ class Backtester:
                     fd_sp = bar.high + atr * 0.3
                     fd_t1 = bal.poc; fd_t2 = bal.lo
             if not m8s and bar.low < bal.lo - bk_t * 0.5 and bar.close > bal.lo - bk_t * 0.3 and bull:
-                edge = 1
+                edge = 2 if (V13_MODEL and bk_vs <= 2) else 1
                 if div.strength >= 2: edge += 2
                 if div.persist_abs_buy: edge += 1
                 if not V13_MODEL and self.trap.phase >= 2 and self.trap.direction == -1: edge += 2
@@ -1996,8 +2007,12 @@ class Backtester:
             floor = QUAL_FLOOR_M3
         elif sel == 3 and QUAL_FLOOR_M4 is not None:
             floor = QUAL_FLOOR_M4
+        elif sel == 4 and QUAL_FLOOR_M5 is not None:
+            floor = QUAL_FLOOR_M5
         elif sel == 5 and QUAL_FLOOR_M6 is not None:
             floor = QUAL_FLOOR_M6
+        elif sel == 6 and QUAL_FLOOR_M7 is not None:
+            floor = QUAL_FLOOR_M7
         elif sel == 7 and QUAL_FLOOR_M8 is not None:
             floor = QUAL_FLOOR_M8
         else:
@@ -2151,6 +2166,10 @@ class Backtester:
             tot_pnl    = round(self.tot_pnl, 2),
             trend_ts   = round(self._tr_ts, 3) if sel == 4 else 0.0,
         )
+        # [regime-day instrumentation] day-anchored features at entry (all modes)
+        dxl, dxh, dos, dvw = self._day_features(i, atr)
+        t.day_ext_lo = round(dxl, 3); t.day_ext_hi = round(dxh, 3)
+        t.day_os     = round(dos, 3); t.day_vws    = round(dvw, 3)
         self.cur_trade = t
         self.out.append(t)
         self.day_trades += 1
@@ -2174,6 +2193,33 @@ class Backtester:
     # armed candidate's forward outcome for ML training.
     def _on_any_arm(self, i: int, ctx: dict):
         pass
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # [regime-day instrumentation] Day-anchored features at bar i, causal (only
+    # today's bars up to and including i). Cheap: called once per ENTRY, scans
+    # back to the day boundary (~a few hundred bars max).
+    def _day_features(self, i: int, atr: float):
+        if atr <= 0:
+            return 0.0, 0.0, 0.0, 0.0
+        bar = self.bars[i]
+        j0 = i
+        while j0 > 0 and self.bars[j0 - 1].date_tag == bar.date_tag:
+            j0 -= 1
+        dlo = min(self.bars[j].low  for j in range(j0, i + 1))
+        dhi = max(self.bars[j].high for j in range(j0, i + 1))
+        n = above = below = 0
+        for j in range(j0, i + 1):
+            if j < len(self.vwap_v) and self.vwap_v[j] > 0:
+                n += 1
+                if   self.bars[j].close > self.vwap_v[j]: above += 1
+                elif self.bars[j].close < self.vwap_v[j]: below += 1
+        d_os = (above - below) / n if n else 0.0
+        js = max(j0, i - 20)
+        d_vws = 0.0
+        if i < len(self.vwap_v) and js < len(self.vwap_v) \
+           and self.vwap_v[i] > 0 and self.vwap_v[js] > 0:
+            d_vws = (self.vwap_v[i] - self.vwap_v[js]) / atr
+        return (bar.close - dlo) / atr, (dhi - bar.close) / atr, d_os, d_vws
 
     # ──────────────────────────────────────────────────────────────────────────
     def _manage(self, i: int, bar: Bar, atr: float):
@@ -2436,6 +2482,7 @@ CSV_FIELDS = [
     "CtrlScore","DivStr","Delta","BarSpeed","ExitPx","ExitReason","HoldBars",
     "MAE","MFE","DayPnL","TotalPnL","FadeEdge","FadeType","RiskMult",
     "TrendReg","VolReg","ChopReg","Version","TrendTS",
+    "DayExtLo","DayExtHi","DayOS","DayVws",
 ]
 
 def write_csv(trades: List[Trade], path: str):
@@ -2456,6 +2503,8 @@ def write_csv(trades: List[Trade], path: str):
                 "RiskMult": t.risk_mult, "TrendReg": t.trend_reg,
                 "VolReg": t.vol_reg, "ChopReg": t.chop_reg,
                 "Version": "v12.25-py", "TrendTS": t.trend_ts,
+                "DayExtLo": t.day_ext_lo, "DayExtHi": t.day_ext_hi,
+                "DayOS": t.day_os, "DayVws": t.day_vws,
             })
 
 # ─────────────────────────────────────────────────────────────────────────────
