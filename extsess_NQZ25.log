@@ -1,0 +1,136 @@
+
+A/B on F.US.ENQZ25.scid: prod session vs extended 00:00-15:45
+
+========== SCENARIO: prod_session ==========
+  overrides: {'NEWS_FILTER': 1, 'TARGET_VOL': 3000, 'SCALE_OUT': False, 'MAX_TRADES': 1, 'DAILY_LOSS': 800.0, 'DAILY_PROF': 0.0, 'RTH_OPEN': 935, 'FLATTEN_HHMM': 1555, 'LATE_ENTRY_GATE': 1555, 'C_OPEN_COOL': 36}
+Reading F.US.ENQZ25.scid
+  File size: 1.37 GB  (34,258,109 records)  price_scale=÷1
+  Loaded 34,258,109 records.
+Building 3000-contract volume bars ...
+  Total bars: 12,423  |  RTH bars: 8,976
+Running backtest ...
+  Pre-computing indicators (12,423 bars)...
+  Running strategy loop...
+  [DIAG] spike triggers: range=0 delta=3 vcool_threshold_hits=0 | bars_blocked spike=51 vcool=0 | peak_range_ratio=2.67
+  [DIAG] risk_model=v12_32_fixed setups_killed_by_RM_floor=40
+  [DIAG] funnel {'armed': 190, 'regime': 0, 'm1_extra': 15, 'rm_floor': 40, 'cool_stop': 0, 'qual': 126, 'entered': 9} | days: RTH=69 armed=55 traded=9
+  Generated 18 records  (9 completed trades)
+
+==============================================================
+  IOF NQ AUTOPILOT — BACKTEST SUMMARY  (NQZ25-CME)
+==============================================================
+  Total trades    : 9
+  Win rate        : 55.6%  (5W / 4L)
+  Net P&L         : $-530.00
+  Avg win         : $398.00
+  Avg loss        : $-630.00
+  Profit factor   : 0.79
+--------------------------------------------------------------
+  Mode      Trades       WR     Net P&L
+  M1             4    25.0%   -1,090.00
+  M2             1   100.0%      155.00
+  M6             4    75.0%      405.00
+--------------------------------------------------------------
+  Exit reasons: FLATTEN:1, STOP:3, T2:1, TRAIL:4
+==============================================================
+
+CSV written to: C:\Users\17034\MyFolder\IOF_NQ_Production_Final\IOF_NQ_extsess_F.US.ENQZ25_prod_session.csv
+
+========== SCENARIO: ext_session ==========
+  overrides: {'NEWS_FILTER': 1, 'TARGET_VOL': 3000, 'SCALE_OUT': False, 'MAX_TRADES': 1, 'DAILY_LOSS': 800.0, 'DAILY_PROF': 0.0, 'RTH_OPEN': 0, 'FLATTEN_HHMM': 1545, 'LATE_ENTRY_GATE': 1545, 'C_OPEN_COOL': 5}
+Reading F.US.ENQZ25.scid
+  File size: 1.37 GB  (34,258,109 records)  price_scale=÷1
+  Loaded 34,258,109 records.
+Building 3000-contract volume bars ...
+  Total bars: 12,423  |  RTH bars: 10,730
+Running backtest ...
+  Pre-computing indicators (12,423 bars)...
+  Running strategy loop...
+  [DIAG] spike triggers: range=0 delta=3 vcool_threshold_hits=0 | bars_blocked spike=49 vcool=0 | peak_range_ratio=2.83
+  [DIAG] risk_model=v12_32_fixed setups_killed_by_RM_floor=38
+  [DIAG] funnel {'armed': 222, 'regime': 0, 'm1_extra': 18, 'rm_floor': 38, 'cool_stop': 0, 'qual': 129, 'entered': 37} | days: RTH=69 armed=64 traded=37
+  Generated 74 records  (37 completed trades)
+
+==============================================================
+  IOF NQ AUTOPILOT — BACKTEST SUMMARY  (NQZ25-CME)
+==============================================================
+  Total trades    : 37
+  Win rate        : 48.6%  (18W / 19L)
+  Net P&L         : $-552.04
+  Avg win         : $680.00
+  Avg loss        : $-673.27
+  Profit factor   : 0.96
+--------------------------------------------------------------
+  Mode      Trades       WR     Net P&L
+  M1            33    45.5%     -865.00
+  M2             1   100.0%      155.00
+  M4             1   100.0%      495.00
+  M6             2    50.0%     -337.04
+--------------------------------------------------------------
+  Exit reasons: STOP:19, TRAIL:18
+==============================================================
+
+CSV written to: C:\Users\17034\MyFolder\IOF_NQ_Production_Final\IOF_NQ_extsess_F.US.ENQZ25_ext_session.csv
+
+========== SCENARIO: ext_allcool5 ==========
+  overrides: {'NEWS_FILTER': 1, 'TARGET_VOL': 3000, 'SCALE_OUT': False, 'MAX_TRADES': 1, 'DAILY_LOSS': 800.0, 'DAILY_PROF': 0.0, 'RTH_OPEN': 0, 'FLATTEN_HHMM': 1545, 'LATE_ENTRY_GATE': 1545, 'C_OPEN_COOL': 5, 'C_COOL_LOSS': 5, 'C_COOL_STOP': 5}
+Reading F.US.ENQZ25.scid
+  File size: 1.37 GB  (34,258,109 records)  price_scale=÷1
+  Loaded 34,258,109 records.
+Building 3000-contract volume bars ...
+  Total bars: 12,423  |  RTH bars: 10,730
+Running backtest ...
+  Pre-computing indicators (12,423 bars)...
+  Running strategy loop...
+  [DIAG] spike triggers: range=0 delta=3 vcool_threshold_hits=0 | bars_blocked spike=49 vcool=0 | peak_range_ratio=2.83
+  [DIAG] risk_model=v12_32_fixed setups_killed_by_RM_floor=38
+  [DIAG] funnel {'armed': 222, 'regime': 0, 'm1_extra': 18, 'rm_floor': 38, 'cool_stop': 0, 'qual': 129, 'entered': 37} | days: RTH=69 armed=64 traded=37
+  Generated 74 records  (37 completed trades)
+
+==============================================================
+  IOF NQ AUTOPILOT — BACKTEST SUMMARY  (NQZ25-CME)
+==============================================================
+  Total trades    : 37
+  Win rate        : 48.6%  (18W / 19L)
+  Net P&L         : $-552.04
+  Avg win         : $680.00
+  Avg loss        : $-673.27
+  Profit factor   : 0.96
+--------------------------------------------------------------
+  Mode      Trades       WR     Net P&L
+  M1            33    45.5%     -865.00
+  M2             1   100.0%      155.00
+  M4             1   100.0%      495.00
+  M6             2    50.0%     -337.04
+--------------------------------------------------------------
+  Exit reasons: STOP:19, TRAIL:18
+==============================================================
+
+CSV written to: C:\Users\17034\MyFolder\IOF_NQ_Production_Final\IOF_NQ_extsess_F.US.ENQZ25_ext_allcool5.csv
+
+================================================================================
+COMPARISON on F.US.ENQZ25
+================================================================================
+Metric                 prod_session      ext_session     ext_allcool5
+---------------------------------------------------------------------
+Trades (N)                        9               37               37
+Pre-9:35 exits                    0               30               30
+Wins / Losses                   5/4            18/19            18/19
+Win rate %                     55.6             48.6             48.6
+Total PnL $                    -530             -552             -552
+Profit factor                  0.79             0.96             0.96
+Avg win $                       398              680              680
+Avg loss $                     -630             -673             -673
+Expectancy $/tr                 -59              -15              -15
+Max DD $                      -2520            -5535            -5535
+
+Delta vs prod_session:
+  ext_session     PnL $     -22  Trades  +28  MaxDD $  -3,015  -> test_worse
+  ext_allcool5    PnL $     -22  Trades  +28  MaxDD $  -3,015  -> test_worse
+
+Mode mix:
+Mode       prod_session      ext_session     ext_allcool5
+M1                    4               33               33
+M2                    1                1                1
+M4                    0                1                1
+M6                    4                2                2
