@@ -206,6 +206,13 @@ TREND_DEPTH_LB  = 20    # bars scanned for the below-VWAP excursion depth
 TICK         = 0.25
 PT_VAL       = 20.0          # NQ: $20/point ($5/tick)
 COMMISSION   = 5.0           # RT per trade
+# [overnight-slip-ab] Extra slippage, ticks per side, charged on fills that occur
+# before OVERNIGHT_END_HHMM ET — models the thin overnight book for the extended-
+# session A/B (backtest_ext_slip_ab.py). Charged on the entry fill and on
+# market-type exits (STOP/TRAIL/CB/SCRATCH/TFAIL/FLATTEN/DAILY_*); passive limit
+# target fills (T1/T2) are not charged. Default 0.0 = off -> byte-identical.
+OVERNIGHT_SLIP_TICKS = 0.0
+OVERNIGHT_END_HHMM   = 935
 
 # [v12.32-ab] Risk-model switch for the v12.31-vs-v12.32 cross-check.
 #   "v12_32_fixed" — per-bar EMA updates, time-decay follows the 50/200-bar curve.
@@ -2137,6 +2144,10 @@ class Backtester:
         self.qty       = self._lot_count()
         self.lots_open = self.qty
         self._realized = 0.0
+        # [overnight-slip-ab] thin-book entry haircut, booked as banked cost so
+        # it lands in the final pnl at _close (works for scale-out legs too)
+        if OVERNIGHT_SLIP_TICKS > 0 and bar.hhmm < OVERNIGHT_END_HHMM:
+            self._realized -= OVERNIGHT_SLIP_TICKS * TICK * PT_VAL * self.qty
         # [trend iter-2] mark trend-long positions so _manage can apply TFAIL
         self._is_trend = (sel == 4 and TREND_LONG and bool(self._tr_stop))
 
@@ -2322,6 +2333,11 @@ class Backtester:
         lots = getattr(self, "lots_open", 1) or 1
         leg  = (((ex_px - self.entry_px) if il else (self.entry_px - ex_px)) * PT_VAL
                 - COMMISSION) * lots
+        # [overnight-slip-ab] thin-book haircut on market-type overnight exits;
+        # T1/T2 are passive limit fills and don't cross the spread
+        if OVERNIGHT_SLIP_TICKS > 0 and bar.hhmm < OVERNIGHT_END_HHMM \
+                and reason not in ("T1", "T2"):
+            leg -= OVERNIGHT_SLIP_TICKS * TICK * PT_VAL * lots
         pnl  = getattr(self, "_realized", 0.0) + leg
 
         self.day_pnl += pnl
