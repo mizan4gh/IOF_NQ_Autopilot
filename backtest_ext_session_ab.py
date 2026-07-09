@@ -25,11 +25,11 @@ _PROD = dict(
     NEWS_FILTER=1,
     TARGET_VOL=3000,
     SCALE_OUT=False,
-    MAX_TRADES=6,
+    MAX_TRADES=1,
     DAILY_LOSS=800.0,
     DAILY_PROF=0.0,
 )
-TAG = "mt6"  # output-file tag so MT=1 and MT=6 runs don't clobber each other
+TAG = "mt1"  # output-file tag so MT=1 and MT=6 runs don't clobber each other
 
 SCENARIOS = {
     "prod_session": {**_PROD, "RTH_OPEN": 935, "FLATTEN_HHMM": 1555,
