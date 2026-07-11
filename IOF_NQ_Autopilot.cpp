@@ -691,6 +691,30 @@ static void WriteCSV(SCStudyInterfaceRef& sc, const char* Evt, const char* Side,
     fclose(F);
 }
 
+// [live-fire audit] Append ONLY genuine real-time fires to a dedicated file.
+// Called AFTER the signalOnly guard in the SETUP block, so recalc / replay /
+// historical-download rows can never reach it (unlike IOF_NQ_<sym>.csv, which
+// logs backfill too and is therefore useless for confirming live fires). Every
+// row here is a setup for which a live order was submitted this session —
+// unambiguous, append-only, no recalc pollution.
+static void WriteLiveFire(SCStudyInterfaceRef& sc, const char* mode, const char* side,
+                          int q100, int score, float ent, float sl, float t1, float t2,
+                          int qty, float riskMult)
+{
+    InitRunID();
+    int Y,Mo,D,Hr,Mi,Se;
+    sc.BaseDateTimeIn[sc.Index].GetDateTimeYMDHMS(Y,Mo,D,Hr,Mi,Se);
+    EnsureDir(sc.DataFilesFolder().GetChars());
+    SCString Path; Path.Format("%s\\IOF_NQ_LiveFires_%s.csv",
+                               sc.DataFilesFolder().GetChars(), sc.Symbol.GetChars());
+    FILE* TF=fopen(Path.GetChars(),"r"); bool Hdr=(TF==NULL); if(TF) fclose(TF);
+    FILE* F=fopen(Path.GetChars(),"a"); if(!F) return;
+    if(Hdr) fprintf(F,"Date,Time,Mode,Side,Q,Score,Entry,SL,TP1,TP2,Qty,RiskMult,Version,RunID\n");
+    fprintf(F,"%04d-%02d-%02d,%02d:%02d:%02d,%s,%s,%d,%d,%.2f,%.2f,%.2f,%.2f,%d,%.2f,v12.38,%llu\n",
+        Y,Mo,D,Hr,Mi,Se, mode, side, q100, score, ent, sl, t1, t2, qty, riskMult, g_runID);
+    fclose(F);
+}
+
 static void LogError(SCStudyInterfaceRef& sc, const char* msg) {
     SCString m; m.Format("[V18A ERROR] %s", msg);
     sc.AddMessageToLog(m, 1);
@@ -3823,6 +3847,16 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
             sc.AddMessageToLog(m,0);
         }
         return;
+    }
+
+    // [live-fire audit] Reached only when !signalOnly — a genuine live fire.
+    // Logged before order submission so the SIGNAL is captured regardless of the
+    // fill outcome. Recalc/replay never reaches here (returned above). See
+    // WriteLiveFire — file IOF_NQ_LiveFires_<sym>.csv.
+    if(CSV_ON){
+        WriteLiveFire(sc, mN, selLong?"BUY":"SELL", qScore100, finalScore,
+                      entryPrice, stopPrice, tp1Price, tp2Price, baseQty,
+                      pRisk?pRisk->riskMultiplier:1.f);
     }
 
     // Live order submission
