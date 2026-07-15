@@ -554,6 +554,24 @@ class VP5Day:
 # ─────────────────────────────────────────────────────────────────────────────
 #  CONTROL SCORE
 # ─────────────────────────────────────────────────────────────────────────────
+class _VPView:
+    """[vp-lookahead-fix] Immutable per-bar snapshot of the VP composite.
+
+    The strategy loop MUST NOT read the live VP5Day object: `vp.update()` runs to
+    completion over every bar in the pre-compute loop before the strategy loop
+    starts, so `vp.poc/vah/val` hold the END-OF-FILE composite — i.e. the future.
+    Snapshotting each bar's levels during the pre-compute pass is what makes the
+    read causal. LIVE cpp recomputes inside its per-bar loop and was never wrong.
+    """
+    __slots__ = ("poc", "vah", "val", "valid")
+
+    def __init__(self, poc: float, vah: float, val: float, valid: bool):
+        self.poc = poc
+        self.vah = vah
+        self.val = val
+        self.valid = valid
+
+
 def control_score(bars: List[Bar], i: int, vp: VP5Day, delta_mature: bool) -> int:
     if not delta_mature or i < 5:
         return 0
@@ -1105,6 +1123,9 @@ class Backtester:
 
         # Objects
         self.vp    = VP5Day()
+        # [vp-lookahead-fix] per-bar snapshots; strategy loop reads self.vp_v[i],
+        # never self.vp (which ends the pre-compute pass holding future levels).
+        self.vp_v: List[_VPView] = []
         self.risk  = Risk()
         self.inst_risk = InstRisk()  # [v12.32-ab] full RM model for the bug A/B
         self.trap  = Trap()
@@ -1199,6 +1220,8 @@ class Backtester:
             bar_abs_d = abs(bar.ask_vol - bar.bid_vol)
             _ad_ema = _ad_ema + _ad_alpha * (bar_abs_d - _ad_ema) if _ad_ema > 0 else float(bar_abs_d)
             self.vp.update(bar)
+            self.vp_v.append(_VPView(self.vp.poc, self.vp.vah, self.vp.val,
+                                     self.vp.valid))
             self.atr_v.append(a)
             self.vwap_v.append(v)
             self.vwap_sd.append(s)
@@ -1337,7 +1360,7 @@ class Backtester:
         bull     = bar.close > bar.open
         bear     = bar.close < bar.open
 
-        ctrl = control_score(self.bars, i, self.vp, dm)
+        ctrl = control_score(self.bars, i, self.vp_v[i], dm)
         div  = divergence(self.bars, i, self.cum_d, atr)
         bal  = balance_state(self.bars, i, atr)
         imb  = imbalance_state(self.bars, i)
@@ -1417,9 +1440,9 @@ class Backtester:
             m1s = dip_s
 
         # M2 — VP level test
-        if vwap_ok and self.vp.valid and atr > 0:
+        if vwap_ok and self.vp_v[i].valid and atr > 0:
             vp_z = atr * 0.75
-            for lv in [self.vp.poc, self.vp.vah, self.vp.val]:
+            for lv in [self.vp_v[i].poc, self.vp_v[i].vah, self.vp_v[i].val]:
                 if lv <= 0 or abs(bar.close - lv) > vp_z:
                     continue
                 if bar.low <= lv + TICK and bar.close > lv and bull and sc_l >= C_MIN_SC_ALL and ctrl >= 0:
@@ -1568,8 +1591,8 @@ class Backtester:
                         at_lev = True
                     if self.prev_imb_dir < 0 and vb2l > 0 and self.prev_imb_extreme <= vb2l + atr * 0.3:
                         at_lev = True
-                    if self.vp.valid:
-                        for lv in (self.vp.poc, self.vp.vah, self.vp.val):
+                    if self.vp_v[i].valid:
+                        for lv in (self.vp_v[i].poc, self.vp_v[i].vah, self.vp_v[i].val):
                             if lv > 0 and abs(self.prev_imb_extreme - lv) <= atr * 0.5:
                                 at_lev = True; break
                     if at_lev: rv_vs += 1
@@ -1634,8 +1657,8 @@ class Backtester:
                         at_lev = True
                     if self.m8_prev_imb_dir < 0 and vb2l > 0 and self.m8_prev_imb_extreme <= vb2l + atr * 0.3:
                         at_lev = True
-                    if self.vp.valid:
-                        for lv in (self.vp.poc, self.vp.vah, self.vp.val):
+                    if self.vp_v[i].valid:
+                        for lv in (self.vp_v[i].poc, self.vp_v[i].vah, self.vp_v[i].val):
                             if lv > 0 and abs(self.m8_prev_imb_extreme - lv) <= atr * 0.5:
                                 at_lev = True; break
                     if at_lev: rv_vs_m8 += 1
@@ -1752,8 +1775,8 @@ class Backtester:
             if abs_up or abs_dn:
                 abs_e = 3
                 at_k = False
-                if self.vp.valid:
-                    for lv in (self.vp.poc, self.vp.vah, self.vp.val):
+                if self.vp_v[i].valid:
+                    for lv in (self.vp_v[i].poc, self.vp_v[i].vah, self.vp_v[i].val):
                         if lv > 0 and abs(bar.close - lv) <= atr * 0.5: at_k = True
                 if vwap > 0 and abs(bar.close - vwap) <= atr * 0.5: at_k = True
                 if at_k: abs_e += 2
@@ -1856,9 +1879,9 @@ class Backtester:
                 m4_poss = (bar.high > sw_hi_d + TICK) or (bar.low < sw_lo_d - TICK)
             # M2 near-miss: a VP level within ATR*0.75 of close
             m2_poss = False
-            if self.vp.valid and atr > 0:
+            if self.vp_v[i].valid and atr > 0:
                 vpz = atr * 0.75
-                for lv in (self.vp.poc, self.vp.vah, self.vp.val):
+                for lv in (self.vp_v[i].poc, self.vp_v[i].vah, self.vp_v[i].val):
                     if lv > 0 and abs(bar.close - lv) <= vpz:
                         m2_poss = True; break
             # M6 near-miss: close beyond a balance edge by half the breakout band
@@ -2104,8 +2127,9 @@ class Backtester:
                 if not sl and m7_stop < sp: sp = round(m7_stop / TICK) * TICK
 
         # [vp-targets] Override T1/T2 with VP levels (per-target ATR fallback).
-        if VP_TARGETS and self.vp.valid and atr > 0:
-            lvls = sorted(lv for lv in (self.vp.poc, self.vp.vah, self.vp.val)
+        if VP_TARGETS and self.vp_v[i].valid and atr > 0:
+            lvls = sorted(lv for lv in (self.vp_v[i].poc, self.vp_v[i].vah,
+                                        self.vp_v[i].val)
                           if lv > 0)
             mind = atr * VP_T_MIN_ATR
             if sl:
