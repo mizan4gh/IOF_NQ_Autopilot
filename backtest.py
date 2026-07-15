@@ -137,6 +137,19 @@ C_M5_PHASE3_MAX = 20   # max bars in phase 3 before reset
 C_VWAP_SLP_LB   = 20   # [v12.22] VWAP slope lookback for M1 directional filter
 C_VWAP_SLP_TOL  = 0.02 # [v12.22] M1 VWAP slope tolerance as ATR fraction (tight)
 
+# [M2 geometry partition] M2 is the VP-level trigger, and its arm condition
+# (bar.low <= lv + TICK) is a SUPERSET: it fires both when price merely grazes the
+# level and holds ("touch"), and when price penetrates BEYOND it and closes back
+# ("sweep") — M4's geometry, the one shape this strategy reliably wins on.
+#   "all"   = live behavior, byte-identical (default)
+#   "sweep" = only arms that penetrated the level by > 1 tick (M4-like)
+#   "touch" = only arms that did NOT penetrate (grazed and held)
+# RESULT (2026-07-14): the partition is VACUOUS — M2 already sweeps ~36/36 fires;
+# "touch" is measure-zero because it needs the bar's low inside a 1-tick window at
+# the level while closing back past it, and real bars have range. sweep ≡ all.
+# Kept as a falsification record + guard against re-testing the same idea.
+M2_GEOM = "all"
+
 DAILY_LOSS   = 0.0           # 0 = disabled
 DAILY_PROF   = 0.0           # 0 = disabled
 NEWS_FILTER  = 0             # 0 = off
@@ -554,6 +567,17 @@ class VP5Day:
 # ─────────────────────────────────────────────────────────────────────────────
 #  CONTROL SCORE
 # ─────────────────────────────────────────────────────────────────────────────
+def _m2_geom_ok(swept: bool) -> bool:
+    """[M2_GEOM] Admit an M2 arm based on whether it swept the VP level."""
+    if M2_GEOM == "all":
+        return True
+    if M2_GEOM == "sweep":
+        return swept
+    if M2_GEOM == "touch":
+        return not swept
+    raise ValueError(f"bad M2_GEOM: {M2_GEOM!r} (want all|sweep|touch)")
+
+
 class _VPView:
     """[vp-lookahead-fix] Immutable per-bar snapshot of the VP composite.
 
@@ -1445,10 +1469,15 @@ class Backtester:
             for lv in [self.vp_v[i].poc, self.vp_v[i].vah, self.vp_v[i].val]:
                 if lv <= 0 or abs(bar.close - lv) > vp_z:
                     continue
+                # [M2_GEOM] did price penetrate the level, or merely graze it?
+                swept_l = bar.low  < lv - TICK
+                swept_s = bar.high > lv + TICK
                 if bar.low <= lv + TICK and bar.close > lv and bull and sc_l >= C_MIN_SC_ALL and ctrl >= 0:
-                    m2l = True
+                    if _m2_geom_ok(swept_l):
+                        m2l = True
                 if bar.high >= lv - TICK and bar.close < lv and bear and sc_s >= C_MIN_SC_ALL and ctrl <= 0:
-                    m2s = True
+                    if _m2_geom_ok(swept_s):
+                        m2s = True
 
         # M3 — Consolidation breakout / rejection
         if i >= C_CONSOL_LB and atr > 0 and vwap_ok:
