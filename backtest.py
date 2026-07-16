@@ -237,6 +237,19 @@ OVERNIGHT_END_HHMM   = 935
 #                    of pre-port backtest.py for sanity-checking).
 RISK_MODEL   = "v12_32_fixed"
 
+# [2026-07-15] Imbalance subsystem fidelity. See ImbState (~line 949).
+#   "cpp_stateful"      — faithful port of live cpp ImbalanceState (struct
+#                         cpp:911, update cpp:2868-2899): imbStr>=3 threshold,
+#                         0.62/0.72 aggression bands, and strength-decay
+#                         persistence for (startBar+barCount+3) bars.
+#   "legacy_stateless"  — pre-fix behavior: score>=2, 0.55/0.65 bands, no
+#                         persistence. Diverged from live; over-generated
+#                         degenerate M8 type-2 fades (targets on the wrong side
+#                         of entry -> instant "T2" at a loss). Kept for A/B only.
+# NOTE: imb also feeds the M6 breakout confirm (imb.active/direction), so this
+# flag moves M6 as well as M7/M8 — it is not an M8-only lever.
+IMB_MODEL    = "cpp_stateful"
+
 # [v12.33/34] M1 pullback confirmation mode. Mirrors cpp sc.Input[16].
 #   0 = off (legacy two-bar continuation)
 #   1 = wick-reject gate (failed cross-contract A/B 2026-05-22 — kept for ref)
@@ -856,10 +869,92 @@ class Imb:
     strength:  int   = 0
     extreme:   float = 0.0
 
+class ImbState:
+    """
+    [IMB_MODEL=cpp_stateful] Faithful port of the LIVE cpp imbalance subsystem:
+    struct ImbalanceState (IOF_NQ_Autopilot.cpp:911) + its per-bar update
+    (cpp:2868-2899).
+
+    The legacy stateless imbalance_state() below diverged from live in 3 ways:
+      1. activation threshold score>=2   vs cpp imbStr>=3
+      2. aggression bands 0.55/0.65      vs cpp 0.62/0.72  (its own docstring
+         claimed "mirrors C++ 62%/72%" while the code used 0.55/0.65)
+      3. NO persistence: it recomputed from scratch each bar, so `active` fell
+         to False the instant the raw condition lapsed, and `strength` could
+         never decay. cpp instead keeps active=True and decays strength by 1
+         per bar for up to (startBar+barCount+3) before reset().
+
+    (3) is what produced the degenerate M8 type-2 geometry: PrevImbExtreme is
+    refreshed only while imb.active (cpp:3358 == backtest.py:1704/1771 — those
+    two lines were always correct). With no persistence the extreme froze at the
+    last raw-condition bar and went stale while price ran on, so type-2 targets
+    anchored to it (cpp:3460-3466) landed on the wrong side of entry and the
+    trade booked an instant "T2" loss. It also starved the `imb_fading` trigger
+    (strength < prev-1), which in live fires off exactly that decay ramp.
+
+    Guard/order note: cpp updates pImb at line 2868, i.e. AFTER the flatten /
+    late-entry / open-cooldown / no-delta early-returns (cpp:2637-2669). This is
+    called from the same post-gate point in _bar() so gated bars skip the update
+    in both. reset() is wired to the session rollover (cpp:2192).
+    """
+    __slots__ = ("active", "direction", "startBar", "barCount", "strength",
+                 "consecutiveAccept", "aggressionRatio", "extreme")
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.active = False; self.direction = 0; self.startBar = -1
+        self.barCount = 0; self.strength = 0; self.consecutiveAccept = 0
+        self.aggressionRatio = 0.5; self.extreme = 0.0
+
+    def update(self, bars: List[Bar], i: int, atr: float) -> None:
+        # cpp: if(isNewBar&&pImb&&Idx>=10&&ATR>0.f)
+        if i < 10 or atr <= 0.0:
+            return
+        d0 = bars[i].ask_vol   - bars[i].bid_vol
+        d1 = bars[i-1].ask_vol - bars[i-1].bid_vol
+        d2 = bars[i-2].ask_vol - bars[i-2].bid_vol
+        imb_str = 0; imb_dir = 0
+        if d0 > d1 and d1 > d2 and d0 > 0.0: imb_str += 1; imb_dir = +1
+        if d0 < d1 and d1 < d2 and d0 < 0.0: imb_str += 1; imb_dir = -1
+
+        aV = bV = 0.0
+        for k in range(5):
+            if i - k < 0: break
+            aV += bars[i-k].ask_vol; bV += bars[i-k].bid_vol
+        tv = aV + bV
+        # cpp: aggR=(tv>0)?((imbDir>=0)?(aV/tv):(bV/tv)):0.5  — note >=0, not >0
+        aggR = ((aV / tv) if imb_dir >= 0 else (bV / tv)) if tv > 0.0 else 0.5
+        if aggR >= 0.62: imb_str += 1
+        if aggR >= 0.72: imb_str += 1
+
+        accept = 0
+        for k in range(8):
+            if i - k - 1 < 0: break
+            if   imb_dir > 0 and bars[i-k].close > bars[i-k-1].high: accept += 1
+            elif imb_dir < 0 and bars[i-k].close < bars[i-k-1].low:  accept += 1
+            else: break
+        if accept >= 2: imb_str += 1
+        if accept >= 4: imb_str += 1
+
+        if imb_str >= 3 and imb_dir != 0:
+            self.active = True; self.direction = imb_dir; self.strength = imb_str
+            self.aggressionRatio = aggR; self.consecutiveAccept = accept
+            self.barCount += 1
+            if self.startBar < 0: self.startBar = i
+        else:
+            if self.active and self.startBar >= 0 and i <= self.startBar + self.barCount + 3:
+                self.strength = self.strength - 1 if self.strength > 0 else 0
+            else:
+                self.reset()
+
+
 def imbalance_state(bars: List[Bar], i: int) -> Imb:
     """
-    Mirrors C++ ImbalanceState: score-based detection using delta streak,
-    aggression ratio, and consecutive price acceptance.  Needs score >= 2.
+    [IMB_MODEL=legacy_stateless] PRE-FIX behavior, retained only so the fix can
+    be A/B'd. Diverges from live cpp — see ImbState above. Do not use as the
+    fidelity reference.
     """
     imb = Imb()
     if i < 5:
@@ -1206,6 +1301,8 @@ class Backtester:
         self.m8_prev_imb_dir   = 0
         self.m8_prev_imb_str   = 0
         self.m8_prev_imb_extreme = 0.0
+        # [IMB_MODEL=cpp_stateful] persistent imbalance state (cpp pImb).
+        self.imb_state = ImbState()
 
         # Spike / volume-cool state (mirrors C++ pNews + pVCool; NEWS_FILTER gated)
         self.spike_bar       = -1
@@ -1285,6 +1382,7 @@ class Backtester:
             self.risk.day_reset()
             self.inst_risk.on_day_reset()  # [v12.32-ab] reset time-decay counter
             self.trap.reset()
+            self.imb_state.reset()         # cpp:2192 resets pImb on session roll
 
         # [v12.32-ab] Per-bar risk-EMA + time-decay updates (mirrors cpp 1714 hoisted block).
         # Behavior diverges by RISK_MODEL: "v12_31_buggy" emulates the AutoLoop=1
@@ -1387,7 +1485,14 @@ class Backtester:
         ctrl = control_score(self.bars, i, self.vp_v[i], dm)
         div  = divergence(self.bars, i, self.cum_d, atr)
         bal  = balance_state(self.bars, i, atr)
-        imb  = imbalance_state(self.bars, i)
+        if IMB_MODEL == "cpp_stateful":
+            # Update at the same point in the flow as cpp:2868 — i.e. after the
+            # flatten/late-entry/open-cool/no-delta gates above, which return
+            # early in both. Gated bars therefore skip the update in both.
+            self.imb_state.update(self.bars, i, atr)
+            imb = self.imb_state
+        else:
+            imb = imbalance_state(self.bars, i)
 
         # Directional score (count confirming delta bars over last 5)
         sc_l = sum(1 for j in range(max(0, i - 4), i + 1)
