@@ -466,6 +466,44 @@ static const float C_DAILY_PROF     = 1000.0f;
 static const float C_COMMISSION_RT  = 5.00f;
 static const float C_SLIPPAGE_BASE  = 0.25f;
 
+// ============================================================================
+//  [v12.39] TRANSIENT-SKIP RETRY
+// ============================================================================
+//  Sierra returns SCT_SKIPPED_* (-8994..-8999) when it declines to SUBMIT an
+//  order at all — the order never reaches the broker. These are NOT broker
+//  rejections. Observed live 2026-07-21: four qualifying M4 setups all came
+//  back order_rc=-8999 (SCT_SKIPPED_DOWNLOADING_HISTORICAL_DATA) because the
+//  chart was re-downloading history mid-session, so the day traded nothing.
+//
+//  The old code logged a REJECT row and dropped the setup. Nothing was
+//  committed (Trades/TradeState untouched), so the study could re-arm — but
+//  M4 arms on one specific sweep+reject bar shape, and that shape is gone by
+//  the next bar. A one-bar interlock therefore cost the whole trade.
+//
+//  RETRY IS DELIBERATELY TIGHT. project_m4_stop_overshoot falsified delayed /
+//  retest M4 entry: the immediate fade at the rejection close IS the edge, so
+//  a fill several bars later is a known-negative trade, not a rescued one.
+//  We therefore replay the ORIGINAL bracket (same entry/stop/targets) and
+//  abandon it unless price is still within C_RETRY_DRIFT_TICKS of the intended
+//  entry. Either we get essentially the trade we wanted, or we get none.
+//
+//  Codes retried (transient): -8999 downloading history, -8998 full recalc,
+//  -8997 one-trade-per-bar, -8995 too many new bars during update.
+//  NOT retried: -8994 auto-trading disabled (user intent, retry would spam),
+//  -8996 invalid index (a bug, not a blip), and every non-SKIPPED code such as
+//  -1 SCTRADING_ORDER_ERROR (a real submission failure that needs fixing, not
+//  re-sending — see the 2026-07-24 order_rc=-1 pair).
+static const int   C_RETRY_MAX_BARS    = 2;   // bars the pending order stays live
+static const float C_RETRY_DRIFT_TICKS = 4.f; // abandon if price drifts beyond this
+
+static inline bool V18A_IsTransientSkip(int rc)
+{
+    return rc == SCT_SKIPPED_DOWNLOADING_HISTORICAL_DATA
+        || rc == SCT_SKIPPED_FULL_RECALC
+        || rc == SCT_SKIPPED_ONLY_ONE_TRADE_PER_BAR
+        || rc == SCT_SKIPPED_TOO_MANY_NEW_BARS_DURING_UPDATE;
+}
+
 static const float C_STOP_FLOOR_PTS = 20.0f;
 static const float C_STOP_CEIL_PTS  = 40.0f;
 static const float C_T1_FLOOR_PTS   = 25.0f;
@@ -682,7 +720,7 @@ static void WriteCSV(SCStudyInterfaceRef& sc, const char* Evt, const char* Side,
               "%d,%d,%.0f,%.2f,"
               "%.2f,%s,%d,%.2f,%.2f,"
               "%.2f,%.2f,%d,%d,"
-              "%.2f,%d,%d,%d,v12.38,%llu\n",
+              "%.2f,%d,%d,%d,v12.39,%llu\n",
         Y,Mo,D,Hr,Mi,Se,Evt,Side,Mode,Entry,SL,TP1,TP2,Qty,Score,
         CtrlSc,DivStr,Delta,BarSpd,
         ExitPx,ExitR,Hold,MAE,MFE,
@@ -710,7 +748,7 @@ static void WriteLiveFire(SCStudyInterfaceRef& sc, const char* mode, const char*
     FILE* TF=fopen(Path.GetChars(),"r"); bool Hdr=(TF==NULL); if(TF) fclose(TF);
     FILE* F=fopen(Path.GetChars(),"a"); if(!F) return;
     if(Hdr) fprintf(F,"Date,Time,Mode,Side,Q,Score,Entry,SL,TP1,TP2,Qty,RiskMult,Version,RunID\n");
-    fprintf(F,"%04d-%02d-%02d,%02d:%02d:%02d,%s,%s,%d,%d,%.2f,%.2f,%.2f,%.2f,%d,%.2f,v12.38,%llu\n",
+    fprintf(F,"%04d-%02d-%02d,%02d:%02d:%02d,%s,%s,%d,%d,%.2f,%.2f,%.2f,%.2f,%d,%.2f,v12.39,%llu\n",
         Y,Mo,D,Hr,Mi,Se, mode, side, q100, score, ent, sl, t1, t2, qty, riskMult, g_runID);
     fclose(F);
 }
@@ -1376,6 +1414,13 @@ enum PersistInt {
     // 44–91: previously reserved for iof_v1_hooks.h ring (removed v12.26).
     // Slots remain unused to preserve PI numbering for any in-flight chartbooks.
     PI_HasEnteredThisLoad = 92,   // [v12.29] per-chart latch for pre-entry DayOpenPnL tracking
+    // [v12.39] transient-skip retry. Appended at fresh indices so existing
+    // chartbook persistent state keeps its meaning (see wire-compat note above).
+    PI_RetryBar        = 93,   // Idx the skipped order was first attempted on (-1 = none)
+    PI_RetryMode       = 94,
+    PI_RetryLong       = 95,
+    PI_RetryQty        = 96,
+    PI_RetryScore      = 97,
 };
 
 enum PersistFloat {
@@ -1410,6 +1455,11 @@ enum PersistFloat {
     //          exit to back-compute the actual broker-side average fill price
     //          when the strategy's reason-resolution falls through to UNKNOWN.
     PF_CumPnL_AtEntry = 28,
+    // [v12.39] transient-skip retry — the ORIGINAL bracket, replayed verbatim.
+    PF_RetryEntryPx   = 29,
+    PF_RetryStopPx    = 30,
+    PF_RetryT1Px      = 31,
+    PF_RetryT2Px      = 32,
 };
 
 enum PersistPtr {
@@ -1685,6 +1735,12 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
     int& BannerShown    = sc.GetPersistentInt(PI_BannerShown);
     int& LastExitWasLoss = sc.GetPersistentInt(PI_LastExitWasLoss);
     int& HasEnteredThisLoad = sc.GetPersistentInt(PI_HasEnteredThisLoad);  // [v12.29]
+    // [v12.39] transient-skip retry (see V18A_IsTransientSkip). RetryBar<=0 = none pending.
+    int& RetryBar       = sc.GetPersistentInt(PI_RetryBar);
+    int& RetryMode      = sc.GetPersistentInt(PI_RetryMode);
+    int& RetryLong      = sc.GetPersistentInt(PI_RetryLong);
+    int& RetryQty       = sc.GetPersistentInt(PI_RetryQty);
+    int& RetryScore     = sc.GetPersistentInt(PI_RetryScore);
 
     float& EntryPx     = sc.GetPersistentFloat(PF_EntryPx);
     float& StopPx      = sc.GetPersistentFloat(PF_StopPx);
@@ -2158,6 +2214,7 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
         LastDay=BarDate; Trades=0; DayDone=0; EntryBar=-1;
         LastExitBar=-1; LastTradeDir=0; DiagBar=-1;
         TradeState=0; T1Hit=0; T1HitBar=-1;
+        RetryBar=0;   // [v12.39] a pending skipped order never crosses a session boundary
         if(LiveTradeDir != 0) {
             LogError(sc, "LiveTradeDir non-zero at day rollover; forcing reset");
         }
@@ -3556,6 +3613,127 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
     }
 
     // ============================================================================
+    //  [v12.39] TRANSIENT-SKIP RETRY — replay a pending order Sierra never sent
+    // ============================================================================
+    //  Placed HERE, above the `if(!goL&&!goS) return;` below, because the bar we
+    //  need to retry on usually has NO fresh arm — M4's sweep+reject shape is
+    //  gone by the next bar. Everything above has already established we are
+    //  flat, under MAX_TRADES, not DayDone, and inside the session/news/flatten
+    //  gates (posQty and Trades checks upstream), so a retry here inherits every
+    //  safety gate a normal entry gets.
+    if(RetryBar > 0 && !signalOnly){
+        const int age = Idx - RetryBar;
+        const float want = sc.GetPersistentFloat(PF_RetryEntryPx);
+        const float drift = fabsf(Close0 - want);
+        bool drop = false; const char* why = "";
+        if(age > C_RETRY_MAX_BARS)                    { drop=true; why="expired"; }
+        else if(drift > C_RETRY_DRIFT_TICKS * TICK)   { drop=true; why="price drifted"; }
+        else if(RetryQty < 1)                         { drop=true; why="bad qty"; }
+
+        if(drop){
+            if(LOG_LVL>=LOG_SIG){
+                SCString m; m.Format("[V18A RETRY] abandoned (%s) age=%d drift=%.2f want=%.2f now=%.2f",
+                    why, age, drift, want, Close0);
+                sc.AddMessageToLog(m,0);
+            }
+            RetryBar=0;
+        } else if(age >= 1){
+            // Replay the ORIGINAL bracket verbatim — not a fresh one at the new
+            // price. A re-priced entry here would be the delayed/retest entry
+            // that project_m4_stop_overshoot already falsified.
+            const float rEnt = want;
+            const float rStp = sc.GetPersistentFloat(PF_RetryStopPx);
+            const float rT1  = sc.GetPersistentFloat(PF_RetryT1Px);
+            const float rT2  = sc.GetPersistentFloat(PF_RetryT2Px);
+            const bool  rLng = (RetryLong != 0);
+
+            s_SCNewOrder ro;
+            ro.OrderQuantity = RetryQty;
+            if(ENTRY_ORD == 0){
+                ro.OrderType = SCT_ORDERTYPE_MARKET;
+            } else if(ENTRY_ORD == 1){
+                ro.OrderType = SCT_ORDERTYPE_LIMIT; ro.Price1 = rEnt;
+            } else {
+                ro.OrderType = SCT_ORDERTYPE_LIMIT;
+                ro.Price1 = rLng ? (rEnt + TICK*2.f) : (rEnt - TICK*2.f);
+            }
+            ro.Stop1Price  = rStp;
+            ro.TimeInForce = SCT_TIF_DAY;
+            // [v12.13] attached-order quantities must sum to <= parent qty.
+            if(RetryQty >= 2){
+                ro.Target1Price = rT1;
+                ro.Target2Price = rT2;
+                ro.OCOGroup1Quantity = (int)floorf((float)RetryQty*C_T1_RATIO);
+                if(ro.OCOGroup1Quantity < 1)          ro.OCOGroup1Quantity = 1;
+                if(ro.OCOGroup1Quantity >= RetryQty)  ro.OCOGroup1Quantity = RetryQty-1;
+            } else {
+                ro.Target1Price = rT1; ro.Target2Price = 0.f; ro.OCOGroup1Quantity = 0;
+            }
+
+            int rrc = rLng ? (int)sc.BuyEntry(ro) : (int)sc.SellEntry(ro);
+            if(rrc > 0){
+                TradeState    = rLng ? 1 : 3;
+                EntryPx       = rEnt;
+                ExpectedFillPx= rEnt;
+                StopPx        = rStp;
+                T1Px          = rT1;
+                T2Px          = rT2;
+                EntryBar      = Idx;
+                LastTradeDir  = rLng ? 1 : -1;
+                LiveTradeDir  = rLng ? 1 : -1;
+                TradeMode     = RetryMode;
+                TradeScore    = RetryScore;
+                EntryQty      = RetryQty;
+                TradeMAE      = 0.f;
+                TradeMFE      = 0.f;
+                CumPnL_AtEntry= pos.CumulativeProfitLoss;
+                Trades++;
+                LastSigBar    = Idx;
+                RetryBar      = 0;
+                // Mirror the hypo shadow exactly as the normal entry path does —
+                // otherwise a retried entry leaves the comparison journal holding
+                // the PREVIOUS trade's state and every later hypo stat is wrong.
+                HypoSide      = rLng ? 1 : -1;
+                HypoEntryPx   = rEnt;
+                HypoSLPx      = rStp;
+                HypoTP1Px     = rT1;
+                HypoTP2Px     = rT2;
+                HypoQty       = RetryQty;
+                HypoT1Hit     = 0;
+                HypoPartialPnL= 0.f;
+
+                static const char* const kRetryModeNames[8]={"M1","M2","M3","M4","M5","M6","M7","M8"};
+                const char* rmN=(RetryMode>=0&&RetryMode<8)?kRetryModeNames[RetryMode]:"M?";
+                if(LOG_LVL>=LOG_CRIT){
+                    SCString m; m.Format("[V18A ENTRY-RETRY] %s %s Ent=%.2f SL=%.2f T1=%.2f T2=%.2f Qty=%d age=%d Trade#%d",
+                        rLng?"LONG":"SHORT", rmN, rEnt, rStp, rT1, rT2, RetryQty, age, Trades);
+                    sc.AddMessageToLog(m,0);
+                }
+                if(CSV_ON){
+                    float dp = pos.CumulativeProfitLoss - DayOpenPnL + pos.OpenProfitLoss;
+                    WriteCSV(sc, "ENTRY", rLng?"BUY":"SELL", rmN,
+                        rEnt, rStp, rT1, rT2, RetryQty, RetryScore,
+                        0, 0, Delta0, 0.f, 0.f, "retry", 0, 0.f, 0.f,
+                        dp, pRisk?pRisk->cumPnL:0.f, 0, 0,
+                        pRisk?pRisk->riskMultiplier:1.f,
+                        pRegime?pRegime->trendRegime:0,
+                        pRegime?pRegime->volRegime:1,
+                        pRegime?pRegime->chopRegime:0);
+                }
+                return;   // entered — nothing else to do on this bar
+            }
+            if(!V18A_IsTransientSkip(rrc)){
+                if(LOG_LVL>=LOG_CRIT){
+                    SCString m; m.Format("[V18A RETRY] gave up — rc=%d (not a transient skip)", rrc);
+                    sc.AddMessageToLog(m,1);
+                }
+                RetryBar=0;   // hard error: stop replaying, let it be diagnosed
+            }
+            // still transient -> leave pending, try again next bar until expiry
+        }
+    }
+
+    // ============================================================================
     //  SIGNAL COMBINATION
     // ============================================================================
     bool goL=m1L||m2L||m3L||m4L||m6L||m8L;   // [v12.24] M5+M7 removed
@@ -3973,14 +4151,77 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
         else        SG_SELL[Idx] = High0 + TICK*4;
     } else {
         // Entry rejected by Sierra
+        // [v12.39] Capture the ORDER-LAYER ENVIRONMENT at the instant of failure.
+        //   Motivation: 2026-07-24 produced two order_rc=-1 (SCTRADING_ORDER_ERROR)
+        //   on well-formed orders (on-tick, correct bracket sides, qty=1) and the
+        //   cause was unrecoverable after the fact — Sierra's Trade Service Log
+        //   holds the real reason but is not persisted, and TradeActivityLog files
+        //   had stopped being written. A -1 on a valid order points at the
+        //   environment (no account selected / service not connected / trading
+        //   disabled), so record that state HERE while we still have it.
+        static const char* const kConnNames[5] =
+            {"DISCONNECTED","CONNECTING","CONNECTED","CONNECTION_LOST","DISCONNECTING"};
+        const int connState = sc.ServerConnectionState;
+        const char* connStr = (connState>=0 && connState<5) ? kConnNames[connState] : "UNKNOWN";
+        const char* acctRaw = sc.SelectedTradeAccount.GetChars();
+        if(acctRaw == NULL || *acctRaw == '\0') acctRaw = "<NONE>";
+        // Account names are user/broker supplied — strip anything that would
+        // shift CSV columns or wrap the row.
+        char acctBuf[48];
+        {
+            size_t n = 0;
+            for(; acctRaw[n] != '\0' && n < sizeof(acctBuf)-1; ++n){
+                const char c = acctRaw[n];
+                acctBuf[n] = (c==','||c=='\n'||c=='\r'||c=='|') ? '_' : c;
+            }
+            acctBuf[n] = '\0';
+        }
+        const char* acct = acctBuf;
+
         if(LOG_LVL>=LOG_CRIT){
             SCString m; m.Format("[V18A REJECT] %s %s — sc.BuyEntry/SellEntry returned %d",
                 selLong?"LONG":"SHORT", mN, orderResult);
             sc.AddMessageToLog(m, 1);
+            SCString e; e.Format("[V18A REJECT-ENV] acct='%s' conn=%s(%d) simMode=%d sendToService=%d "
+                                 "qty=%d ent=%.2f sl=%.2f t1=%.2f t2=%.2f",
+                acct, connStr, connState, sc.GlobalTradeSimulationIsOn,
+                sc.SendOrdersToTradeService, baseQty,
+                entryPrice, stopPrice, tp1Price, tp2Price);
+            sc.AddMessageToLog(e, 1);
+        }
+        // [v12.39] SCT_SKIPPED_* means Sierra never SENT the order (chart was
+        // downloading history, recalculating, etc). Park the exact bracket so
+        // the block above can replay it for the next C_RETRY_MAX_BARS bars
+        // while price is still within C_RETRY_DRIFT_TICKS. Real submission
+        // failures (e.g. -1 SCTRADING_ORDER_ERROR) are NOT parked — those need
+        // fixing, not re-sending.
+        if(V18A_IsTransientSkip(orderResult)){
+            RetryBar   = Idx;
+            RetryMode  = selMode;
+            RetryLong  = selLong ? 1 : 0;
+            RetryQty   = baseQty;
+            RetryScore = finalScore;
+            sc.SetPersistentFloat(PF_RetryEntryPx, entryPrice);
+            sc.SetPersistentFloat(PF_RetryStopPx,  stopPrice);
+            sc.SetPersistentFloat(PF_RetryT1Px,    tp1Price);
+            sc.SetPersistentFloat(PF_RetryT2Px,    tp2Price);
+            if(LOG_LVL>=LOG_CRIT){
+                SCString m; m.Format("[V18A RETRY] parked %s %s rc=%d (transient skip) — will replay <=%d bars",
+                    selLong?"LONG":"SHORT", mN, orderResult, C_RETRY_MAX_BARS);
+                sc.AddMessageToLog(m, 0);
+            }
+        } else {
+            RetryBar = 0;
         }
         if(CSV_ON){
             float dayPnL_now = pos.CumulativeProfitLoss - DayOpenPnL + pos.OpenProfitLoss;
-            char reason[64]; snprintf(reason, 64, "order_rc=%d", orderResult);
+            // [v12.39] Pipe-delimited, NEVER comma-delimited: ExitR is written
+            // into the CSV raw via %s, so a comma here would shift every later
+            // column on this row. snprintf always NUL-terminates within size.
+            char reason[128];
+            snprintf(reason, sizeof(reason), "order_rc=%d|acct=%s|conn=%s|sim=%d|svc=%d",
+                     orderResult, acct, connStr,
+                     sc.GlobalTradeSimulationIsOn, sc.SendOrdersToTradeService);
             WriteCSV(sc, "REJECT", selLong?"BUY":"SELL", mN,
                 entryPrice, stopPrice, tp1Price, tp2Price, baseQty, finalScore,
                 controlScore, pDiv?pDiv->strength:0, Delta0, 0.f,

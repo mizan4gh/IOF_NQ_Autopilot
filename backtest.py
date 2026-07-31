@@ -140,14 +140,14 @@ C_VWAP_SLP_TOL  = 0.02 # [v12.22] M1 VWAP slope tolerance as ATR fraction (tight
 # [M2 geometry partition] M2 is the VP-level trigger, and its arm condition
 # (bar.low <= lv + TICK) is a SUPERSET: it fires both when price merely grazes the
 # level and holds ("touch"), and when price penetrates BEYOND it and closes back
-# ("sweep") — M4's geometry, the one shape this strategy reliably wins on.
+# ("sweep") — M4's geometry, the one shape this strategy reliably wins on. Both
+# subsets are currently pooled into M2's PF curve, which has been falsified at
+# every floor 25..46. This knob partitions them so each can be measured alone.
 #   "all"   = live behavior, byte-identical (default)
 #   "sweep" = only arms that penetrated the level by > 1 tick (M4-like)
 #   "touch" = only arms that did NOT penetrate (grazed and held)
-# RESULT (2026-07-14): the partition is VACUOUS — M2 already sweeps ~36/36 fires;
-# "touch" is measure-zero because it needs the bar's low inside a 1-tick window at
-# the level while closing back past it, and real bars have range. sweep ≡ all.
-# Kept as a falsification record + guard against re-testing the same idea.
+# Hypothesis: touch has no edge (cf. the VWAP-touch engine, falsified in all 3
+# flavors) and is what drags M2's curve; sweep may carry M4-like edge.
 M2_GEOM = "all"
 
 DAILY_LOSS   = 0.0           # 0 = disabled
@@ -160,6 +160,38 @@ NEWS_OVERRIDE_M4_RECLAIM = False
 ENTRY_ORD    = 2             # 0=mkt @ close, 1=lmt @ close (needs next-bar pullback), 2=lmt+2t (marketable)
 MAX_TRADES   = 6
 
+# [M4-midday parallel-admit A/B] Rescue M4 sub-floor setups (quality in
+# [M4_MIDDAY_Q_MIN, floor)) ONLY inside the [START, END) HHMM ET window — the
+# floor stays at its normal value for every other mode and time. Tests whether
+# the isolated-candidate "M4 midday" edge (edge_subfloor_scan.py) survives the
+# real MT=1 strategy's slot displacement. Default off. Harness:
+# backtest_m4_midday_ab.py.
+M4_MIDDAY_ADMIT = False
+M4_MIDDAY_Q_MIN = 40
+M4_MIDDAY_START = 1200
+M4_MIDDAY_END   = 1400
+
+# [M4-OR levels] Opening-range high/low as an additional M4 sweep-level source.
+# Motivation: every level-based trigger tried here so far (M2 on POC/VAH/VAL,
+# VWAP-touch in 3 flavors) used COMPUTED levels and produced no edge, while M4's
+# rolling swing extremes — STRUCTURAL levels where stops actually rest — is the
+# one shape that wins. ORH/ORL are structural in the same sense but were never
+# tested (no opening-range code existed in this repo). This feeds them into M4's
+# proven geometry: sweep past the level by >1 tick, close back inside, same
+# bull/bear + sc>=m4_min + ctrl + VWAP-edge gates. NOT the retail ORB template
+# (no retest/pullback entry, no scale-out — both already falsified here).
+#
+# Causal by construction: or_hi/or_lo accumulate only from bars CLOSING inside
+# [M4_OR_START, M4_OR_END) and are consulted only on bars at/after M4_OR_END.
+# M4_OR_MODE: "add"  = OR levels in addition to the rolling C_SWEEP_LB extremes
+#             "only" = OR levels replace them (isolates OR-sourced edge)
+# Trades armed from an OR level alone are labelled mode "M4o" for attribution.
+# Harness: backtest_m4_or_ab.py.
+M4_OR_LEVELS = False
+M4_OR_START  = 930    # HHMM ET, inclusive
+M4_OR_END    = 1000   # HHMM ET, exclusive — levels frozen and usable from here
+M4_OR_MODE   = "add"
+
 # Multi-contract TP1/TP2 scale-out (default OFF = single-lot, behaviour unchanged).
 # When SCALE_OUT and the sized qty >= 2: lot1 exits at TP1, the runner exits at
 # TP2 else trails after TP1; shared SL -> breakeven+buf once TP1 fills.
@@ -167,6 +199,107 @@ SCALE_OUT    = False         # True = enable multi-lot scale-out
 BASE_QTY     = 1             # base contracts per entry
 SIZE_BY_RM   = False         # True = qty = max(1, round(BASE_QTY * risk_mult))
 DISABLE_MODES = set()        # mode indices (per MODE_NAMES) to suppress, e.g. {5}=M6
+
+# ── [FIXED_BRACKET] Pure held-to-stop/target OCO bracket ────────────────────
+# Models the IOF_MNQ_M2_M4_FixedBracket cpp variant: a fixed tick stop + fixed
+# tick target attached to the whole position at entry, with NO trail / BE /
+# scratch / scale-out / VP-target overrides. When on, _enter overrides sp/t1/t2
+# with the fixed distances and _manage routes to _manage_fixed. Default off so
+# every existing (ATR/trail) harness is byte-unchanged.
+FIXED_BRACKET      = False
+FIXED_STOP_TICKS   = 300      # stop distance in ticks (× TICK points)
+FIXED_TARGET_TICKS = 500      # target distance in ticks
+FIXED_QTY          = 3        # contracts held as one OCO bracket
+# Intrabar open-P&L locks (cpp DAILY_PROF/DAILY_LOSS include OpenProfitLoss, so
+# they truncate an open position at the $ threshold — modeled as a de-facto
+# tighter target/stop). 0 = disabled (pure tick bracket). Dollars = account $.
+FIXED_PROFIT_LOCK  = 0.0
+FIXED_LOSS_LOCK    = 0.0
+
+# ── [FIXED_SCALE] Multi-lot fixed-$ bracket with TP1/TP2 scale-out ──────────
+# A 2-lot attached OCO expressed in DOLLARS PER CONTRACT rather than ticks, so
+# the same numbers port between NQ ($20/pt) and MNQ ($2/pt): distance in points
+# = USD / PT_VAL. Lot 1 exits at TP1, the runner at TP2, both sharing one stop.
+# Differs from FIXED_BRACKET (one whole-position target, no partial) and from
+# SCALE_OUT (strategy ATR/VP targets + a trailing runner): here BOTH legs are
+# fixed and the runner does NOT trail, so the position is exactly what Sierra
+# can attach at entry — nothing to manage after the fill.
+#
+# FIXED_SCALE_BE=True moves the shared stop to breakeven once TP1 fills, making
+# the runner risk-free; False keeps the original stop (a true untouched OCO).
+# Both are A/B'd because that is the one discretionary bit of the design.
+#
+# Default off -> every existing harness (ATR/trail and FIXED_BRACKET alike) is
+# byte-unchanged. Harness: backtest_fixed_scale_2lot_ab.py.
+FIXED_SCALE          = False
+FIXED_SCALE_QTY      = 2        # contracts per entry (lot1 + runner)
+FIXED_SCALE_STOP_USD = 500.0    # shared stop, $ PER CONTRACT
+FIXED_SCALE_TP1_USD  = 500.0    # lot-1 target,  $ PER CONTRACT
+FIXED_SCALE_TP2_USD  = 1000.0   # runner target, $ PER CONTRACT
+FIXED_SCALE_BE       = False    # True = shared stop -> breakeven after TP1
+# [VWAP_FILTER_ALL] Session-VWAP directional filter across EVERY mode. When on,
+# a signal only survives if it is aligned with the daily VWAP: longs require
+# bar.close > vwap, shorts require bar.close < vwap. Gated after the regime
+# filter, before the RM/qual gates, so it counts on its own funnel line
+# ("vwap_dir"). Only applies once session VWAP is valid (vwap > 0); early bars
+# with no VWAP yet pass through. Default False → every existing harness stays
+# byte-identical. Harness: backtest_vwap_all_m2q40_ab.py.
+VWAP_FILTER_ALL = False
+# [VWAP_ANCHOR_RTH] Anchor the daily/session VWAP at the RTH open (first bar with
+# hhmm >= RTH_OPEN) instead of calendar midnight. Default False → VWAP keeps its
+# legacy behavior (accumulates from 00:00 ET, carrying overnight volume). When
+# True, SessionVWAP ignores pre-RTH bars so the VWAP resets fresh at the cash
+# open — the conventional "daily VWAP" most platforms show. Affects every VWAP
+# consumer (M1 bounce, M4 edge gate, VWAP_FILTER_ALL, regime). Harness:
+# backtest_vwap_all_ab.py (VWAP_ANCHOR_RTH arm).
+VWAP_ANCHOR_RTH = False
+# [VWAP_ANCHOR_HHMM] Anchor the session VWAP at an arbitrary session-open time
+# (ET HHMM) instead of RTH open or calendar midnight. Set to 1800 for the Globex
+# electronic-session open (18:00 ET) — the VWAP then spans the full overnight
+# session (18:00 -> next-day 17:00), resetting each day at the 18:00 crossing.
+# Takes precedence over VWAP_ANCHOR_RTH. Default None → disabled.
+VWAP_ANCHOR_HHMM = None
+# [VWAP_NEAR_PTS] Proximity filter: when > 0, only allow an entry if the bar
+# closes within VWAP_NEAR_PTS index points of the (anchored) session VWAP, i.e.
+# abs(close - vwap) <= VWAP_NEAR_PTS. "Place an order only when price is very
+# close to VWAP." Applies to every mode; exits unchanged. Gated after the regime
+# filter (funnel line "vwap_near"). Skipped until VWAP is valid. Default 0.0 =
+# off. Pair with VWAP_ANCHOR_HHMM=1800 for the Globex-anchored VWAP. Harness:
+# backtest_vwap1800_near_ab.py.
+VWAP_NEAR_PTS = 0.0
+# [VWAP_TOUCH_TRIGGER] Standalone VWAP-touch entry ENGINE (not a filter). When
+# True, the normal M1..M8 cascade is bypassed and an order is placed every time
+# price RETURNS to within VWAP_NEAR_PTS of the (anchored) VWAP: long if the VWAP
+# is rising over VWAP_TOUCH_SLOPE_LB bars, short if falling (flat = skip). This
+# reproduces the "enter at every VWAP touch, green=long / red=short" behavior
+# from the live chart. Uses the standard ATR stop + T1/T2 + trail exit machinery.
+# Capped by MAX_TRADES/day and a VWAP_TOUCH_COOL-bar re-arm cooldown. Default off.
+# Harness: backtest_vwap_touch_ab.py.
+VWAP_TOUCH_TRIGGER  = False
+VWAP_TOUCH_SLOPE_LB = 20     # bars for the VWAP-slope (trend) direction read
+VWAP_TOUCH_SLOPE_TOL = 0.02  # min |slope| as ATR fraction to call rising/falling
+VWAP_TOUCH_COOL     = 3      # bars to wait after an entry before re-arming
+# Proximity measured in VWAP standard deviations (the SD bands on the chart):
+# "close to VWAP" = abs(close - vwap) <= VWAP_NEAR_SD * vwap_sd. Takes precedence
+# over VWAP_NEAR_PTS when > 0. Small values (0.25-0.5) = hug the VWAP midline.
+VWAP_NEAR_SD        = 0.0
+# Delta (order-flow) confirmation for the touch entry: require at least
+# VWAP_TOUCH_DELTA_MIN of the last 5 bars to confirm the trade side (buyers for a
+# long, sellers for a short) before entering at the VWAP. 0 = off. 3 = majority
+# of last 5 bars agree. Filters VWAP touches with no flow behind them.
+VWAP_TOUCH_DELTA_MIN = 0
+# Require a genuine PULLBACK into the VWAP from the trend side: for a long
+# (rising VWAP) price must be pulling back DOWN from above the VWAP; for a short
+# (falling VWAP) pulling UP from below. Rejects momentum crosses that touch the
+# VWAP from the wrong side. Default False.
+VWAP_TOUCH_PULLBACK = False
+# Absorption / delta-divergence gate for the touch entry (uses divergence()'s
+# signed strength, −5..+5). When > 0, a long needs strength >= VWAP_TOUCH_ABSORB
+# (bullish absorption: price dips to VWAP but delta holds / down-bars carry buy-
+# delta), a short needs strength <= −VWAP_TOUCH_ABSORB. Opposite of delta
+# confirmation — wants the pullback's flow FAILING. 1 = persist-absorb only,
+# 2 = a real price/delta divergence. Default 0 = off.
+VWAP_TOUCH_ABSORB = 0
 # [v13] Model the v13 cpp's M8 redefinition: balance-edge fade WITHOUT the trap
 # edge term (v13 removed the trap subsystem) + adds the trend-exhaustion fade
 # (type 3) that backtest.py never modeled. Default off → baseline M8 unchanged,
@@ -479,12 +612,28 @@ class SessionVWAP:
     def __init__(self):
         self._spv = self._sv = self._spv2 = 0.0
         self._date = -1
+        self._last_hhmm = 99999   # [VWAP_ANCHOR_HHMM] prior bar's hhmm
 
     def update(self, bar: Bar) -> Tuple[float, float]:
         """Returns (vwap, sd)."""
-        if bar.date_tag != self._date:
-            self._spv = self._sv = self._spv2 = 0.0
-            self._date = bar.date_tag
+        if VWAP_ANCHOR_HHMM is not None:
+            # [VWAP_ANCHOR_HHMM] Reset at the session-open crossing (e.g. 18:00
+            # Globex): the first bar whose hhmm reaches the anchor after the prior
+            # bar was below it. Fires once/day and spans midnight, so the VWAP
+            # covers the full overnight session. No date_tag reset here.
+            if self._last_hhmm < VWAP_ANCHOR_HHMM <= bar.hhmm:
+                self._spv = self._sv = self._spv2 = 0.0
+            self._last_hhmm = bar.hhmm
+        else:
+            if bar.date_tag != self._date:
+                self._spv = self._sv = self._spv2 = 0.0
+                self._date = bar.date_tag
+            # [VWAP_ANCHOR_RTH] Skip overnight bars so the daily VWAP anchors fresh
+            # at the RTH open rather than at calendar midnight. Returns 0.0
+            # (invalid) pre-RTH; the vwap_ok / `vwap > 0` guards read that as
+            # "no VWAP yet".
+            if VWAP_ANCHOR_RTH and bar.hhmm < RTH_OPEN:
+                return 0.0, 0.0
         typ = (bar.high + bar.low + bar.close) / 3.0
         self._sv   += bar.volume
         self._spv  += typ * bar.volume
@@ -580,17 +729,6 @@ class VP5Day:
 # ─────────────────────────────────────────────────────────────────────────────
 #  CONTROL SCORE
 # ─────────────────────────────────────────────────────────────────────────────
-def _m2_geom_ok(swept: bool) -> bool:
-    """[M2_GEOM] Admit an M2 arm based on whether it swept the VP level."""
-    if M2_GEOM == "all":
-        return True
-    if M2_GEOM == "sweep":
-        return swept
-    if M2_GEOM == "touch":
-        return not swept
-    raise ValueError(f"bad M2_GEOM: {M2_GEOM!r} (want all|sweep|touch)")
-
-
 class _VPView:
     """[vp-lookahead-fix] Immutable per-bar snapshot of the VP composite.
 
@@ -607,6 +745,17 @@ class _VPView:
         self.vah = vah
         self.val = val
         self.valid = valid
+
+
+def _m2_geom_ok(swept: bool) -> bool:
+    """[M2_GEOM] Admit an M2 arm based on whether it swept the VP level."""
+    if M2_GEOM == "all":
+        return True
+    if M2_GEOM == "sweep":
+        return swept
+    if M2_GEOM == "touch":
+        return not swept
+    raise ValueError(f"bad M2_GEOM: {M2_GEOM!r} (want all|sweep|touch)")
 
 
 def control_score(bars: List[Bar], i: int, vp: VP5Day, delta_mature: bool) -> int:
@@ -1253,9 +1402,11 @@ class Backtester:
         # [funnel] post-cascade gate kill counters — which gate eats armed setups.
         # Used by funnel_report.py; zero-cost when unread.
         self.funnel = {k: 0 for k in (
-            "armed", "regime", "m1_extra", "rm_floor", "cool_stop", "qual", "entered")}
+            "armed", "regime", "vwap_dir", "vwap_near", "m1_extra", "rm_floor", "cool_stop", "qual", "entered")}
         self.funnel_mode = {}        # per-mode {armed, qual, entered}
         self.funnel_qual_killed = [] # (mode, q) for every qual-floor kill
+        self.funnel_audit = []       # (dt, mode, gate, detail) — dated trail of every cascade outcome
+        self.nofire_audit = []       # (dt, [why…]) — dated M4 near-miss reasons (LOG_NOFIRE only)
         self.fn_days_rth = set(); self.fn_days_armed = set(); self.fn_days_entered = set()
 
         # Trade state
@@ -1284,11 +1435,18 @@ class Backtester:
         self.day_done  = False
         self.tot_pnl   = 0.0
 
+        # [M4-OR levels] per-session opening range, accumulated causally
+        self.or_hi     = None
+        self.or_lo     = None
+        self.or_ready  = False
+        self._m4_or_only = False   # armed from an OR level and not a swing level
+
         # Cooldowns
         self.last_trade_bar = -1
         self.last_loss_bar  = -1
         self.last_stop_bar  = -1
         self.last_stop_dir  = 0
+        self._vt_last_bar   = -1   # [VWAP_TOUCH_TRIGGER] last touch-entry bar
         # [v12.20 port-back] M5 cooldown + M7 prior-imbalance latched state.
         # Restored when ENABLE_M5/ENABLE_M7 are True; otherwise unused.
         self.last_m5_bar    = -1
@@ -1383,6 +1541,20 @@ class Backtester:
             self.inst_risk.on_day_reset()  # [v12.32-ab] reset time-decay counter
             self.trap.reset()
             self.imb_state.reset()         # cpp:2192 resets pImb on session roll
+            self.or_hi = self.or_lo = None   # [M4-OR levels] new session, new OR
+            self.or_ready = False
+
+        # [M4-OR levels] Accumulate the opening range BEFORE the RTH_OPEN gate
+        # below (RTH_OPEN is 09:35, so the 09:30-09:35 bars would otherwise never
+        # be seen). A bar is included only if it CLOSED inside the window, and
+        # the levels are not marked usable until a bar closes at/after M4_OR_END
+        # — so no bar can ever both build the range and trigger on it.
+        if M4_OR_LEVELS:
+            if M4_OR_START <= bar.hhmm < M4_OR_END:
+                self.or_hi = bar.high if self.or_hi is None else max(self.or_hi, bar.high)
+                self.or_lo = bar.low  if self.or_lo is None else min(self.or_lo, bar.low)
+            elif bar.hhmm >= M4_OR_END and self.or_hi is not None:
+                self.or_ready = True
 
         # [v12.32-ab] Per-bar risk-EMA + time-decay updates (mirrors cpp 1714 hoisted block).
         # Behavior diverges by RISK_MODEL: "v12_31_buggy" emulates the AutoLoop=1
@@ -1432,6 +1604,14 @@ class Backtester:
         if bar.hhmm >= LATE_ENTRY_GATE:                                  return
         in_news = bool(NEWS_FILTER) and is_news_window(bar.hhmm)
         if in_news and not NEWS_OVERRIDE_M4_RECLAIM:                     return
+
+        # ── [VWAP_TOUCH_TRIGGER] standalone VWAP-touch entry engine ───────────
+        # Replaces the normal mode cascade: place an order at every fresh return
+        # to the (anchored) VWAP, direction from the VWAP slope. Returns here so
+        # the M1..M8 detection below never runs.
+        if VWAP_TOUCH_TRIGGER:
+            self._vwap_touch(i, bar, atr, vwap)
+            return
 
         # Volume-spike detection + cooldown (mirrors Autopilot.cpp:2092-2120).
         # Decoupled from NEWS_FILTER — runs regardless of news filter setting
@@ -1610,6 +1790,27 @@ class Backtester:
                 m4l = True
             if m4_vwap_edge and bar.high > sw_hi + TICK and bar.close < sw_hi and bear and sc_s >= m4_min and ctrl <= 0:
                 m4s = True
+            # [M4-OR levels] identical shape + gates, sourced from ORH/ORL
+            self._m4_or_only = False
+            if M4_OR_LEVELS:
+                m4l_or = m4s_or = False
+                if self.or_ready:
+                    m4l_or = (m4_vwap_edge and bar.low < self.or_lo - TICK
+                              and bar.close > self.or_lo and bull
+                              and sc_l >= m4_min and ctrl >= 0)
+                    m4s_or = (m4_vwap_edge and bar.high > self.or_hi + TICK
+                              and bar.close < self.or_hi and bear
+                              and sc_s >= m4_min and ctrl <= 0)
+                if M4_OR_MODE == "only":
+                    # suppress the rolling-swing source ALWAYS (including before
+                    # M4_OR_END, where or_ready is still False) so this arm
+                    # isolates the OR source instead of mixing the two
+                    self._m4_or_only = bool(m4l_or or m4s_or)
+                    m4l, m4s = m4l_or, m4s_or
+                else:
+                    self._m4_or_only = bool((m4l_or and not m4l) or (m4s_or and not m4s))
+                    m4l = m4l or m4l_or
+                    m4s = m4s or m4s_or
             if (m4l or m4s):
                 self._on_m4_arm(i, bool(m4l), bar.close, atr, sw_lo if m4l else sw_hi)
             if 3 in DISABLE_MODES:                      # suppress M4 (sweep+reclaim)
@@ -2049,6 +2250,8 @@ class Backtester:
                 if m2_poss: self.nofire_possible["M2"] += 1
                 for w in why:
                     self.nofire_why[w] = self.nofire_why.get(w, 0) + 1
+                if why:
+                    self.nofire_audit.append((bar.dt, list(why)))
                 if len(self.nofire) < 40:
                     self.nofire.append(
                         f"[V18A NOFIRE] {bar.dt:%Y-%m-%d %H:%M} Cls={bar.close:.2f} "
@@ -2114,18 +2317,48 @@ class Backtester:
         ts     = self._trend_str(i, atr)
         vr     = self._vol_reg(i, atr)
         if not self._regime_ok(sel, sl, tr, cr, ts):
-            self.funnel["regime"] += 1; return
+            self.funnel["regime"] += 1
+            self.funnel_audit.append((bar.dt, _mname, "regime", f"tr={tr} cr={cr} ts={ts:.2f}"))
+            return
+
+        # ── [VWAP_FILTER_ALL] daily-VWAP directional filter (all modes) ────────
+        # Only take trades aligned with session VWAP: longs need close > vwap,
+        # shorts need close < vwap. Skipped until VWAP is valid (vwap > 0).
+        if VWAP_FILTER_ALL and vwap > 0:
+            if (sl and bar.close <= vwap) or (not sl and bar.close >= vwap):
+                self.funnel["vwap_dir"] += 1
+                self.funnel_audit.append((bar.dt, _mname, "vwap_dir",
+                                          f"close={bar.close:.2f} vwap={vwap:.2f} side={'L' if sl else 'S'}"))
+                return
+
+        # ── [VWAP_NEAR_PTS] proximity filter (all modes) ──────────────────────
+        # Only enter when price is within VWAP_NEAR_PTS points of the (anchored)
+        # session VWAP. Skipped until VWAP is valid (vwap > 0).
+        if VWAP_NEAR_PTS > 0 and vwap > 0:
+            if abs(bar.close - vwap) > VWAP_NEAR_PTS:
+                self.funnel["vwap_near"] += 1
+                self.funnel_audit.append((bar.dt, _mname, "vwap_near",
+                                          f"close={bar.close:.2f} vwap={vwap:.2f} dist={abs(bar.close-vwap):.2f}"))
+                return
         if sel == 0 and vr == 0:          # M1: no trades in flat/low-ATR market
-            self.funnel["m1_extra"] += 1; return
+            self.funnel["m1_extra"] += 1
+            self.funnel_audit.append((bar.dt, _mname, "m1_extra", ""))
+            return
         if sel == 0 and 1200 <= bar.hhmm <= 1359:  # M1: dead zone (0% WR 12-14h)
-            self.funnel["m1_extra"] += 1; return
+            self.funnel["m1_extra"] += 1
+            self.funnel_audit.append((bar.dt, _mname, "m1_extra", ""))
+            return
         if sel == 0:  # M1 directional trend gate: don't buy into downtrend / sell into uptrend
             lb20 = min(20, i)
             pc20 = bar.close - self.bars[i - lb20].close if lb20 > 0 else 0.0
             if sl  and pc20 < -atr * 0.5:   # LONG into falling market
-                self.funnel["m1_extra"] += 1; return
+                self.funnel["m1_extra"] += 1
+            self.funnel_audit.append((bar.dt, _mname, "m1_extra", ""))
+            return
             if not sl and pc20 >  atr * 0.5:  # SHORT into rising market
-                self.funnel["m1_extra"] += 1; return
+                self.funnel["m1_extra"] += 1
+            self.funnel_audit.append((bar.dt, _mname, "m1_extra", ""))
+            return
 
         # ── RM floor ─────────────────────────────────────────────────────────
         # [v12.32-ab] Gate by full RM model (mirrors cpp line 3453). The legacy
@@ -2134,6 +2367,7 @@ class Backtester:
         if self.inst_risk.rm < C_RM_FLOOR:
             self.rm_gated += 1
             self.funnel["rm_floor"] += 1
+            self.funnel_audit.append((bar.dt, _mname, "rm_floor", f"rm={self.inst_risk.rm:.2f}"))
             self._on_rm_gated(
                 i, sel, sl, atr, ctrl, div, sc_l, sc_s, bk_vs,
                 m6_sp, m6_t1, m6_t2,
@@ -2145,7 +2379,9 @@ class Backtester:
         if self.last_stop_bar >= 0 and i <= self.last_stop_bar + C_COOL_STOP:
             same = (sl and self.last_stop_dir > 0) or (not sl and self.last_stop_dir < 0)
             if same:
-                self.funnel["cool_stop"] += 1; return
+                self.funnel["cool_stop"] += 1
+                self.funnel_audit.append((bar.dt, _mname, "cool_stop", ""))
+                return
 
         # ── Quality score ─────────────────────────────────────────────────────
         # M1/M2/M3: (finalScore*100)/15 — need score >= 6 to clear floor 40.
@@ -2182,12 +2418,18 @@ class Backtester:
         else:
             floor = QUAL_FLOOR
         if q < floor:
-            self.funnel["qual"] += 1; _fm["qual"] += 1
-            self.funnel_qual_killed.append((_mname, q))
-            return
+            _m4mid = (M4_MIDDAY_ADMIT and sel == 3 and q >= M4_MIDDAY_Q_MIN
+                      and M4_MIDDAY_START <= bar.hhmm < M4_MIDDAY_END)
+            if not _m4mid:
+                self.funnel["qual"] += 1; _fm["qual"] += 1
+                self.funnel_qual_killed.append((_mname, q))
+                self.funnel_audit.append((bar.dt, _mname, "qual", f"q={q} floor={floor} side={'L' if sl else 'S'}"))
+                return
+            self.funnel_audit.append((bar.dt, _mname, "m4midday_admit", f"q={q} hhmm={bar.hhmm} side={'L' if sl else 'S'}"))
 
         # ── Enter trade ───────────────────────────────────────────────────────
         self.funnel["entered"] += 1; _fm["entered"] += 1
+        self.funnel_audit.append((bar.dt, _mname, "entered", f"q={q} side={'L' if sl else 'S'}"))
         self.fn_days_entered.add(bar.dt.date())
         self._enter(i, bar, sel, sl, atr, final_sc, ctrl, div,
                     tr, vr, cr, fade_active, fade_edge, fade_type,
@@ -2230,7 +2472,32 @@ class Backtester:
             ep = bar.close  # unknown mode — default to market
 
         # Stop / target
-        if sel == 5 and m6_sp:
+        if FIXED_SCALE:
+            # [FIXED_SCALE] fixed $-per-contract distances -> points via PT_VAL.
+            # t1 != t2: lot1 books at t1, the runner at t2, shared stop at sp.
+            sd  = FIXED_SCALE_STOP_USD / PT_VAL
+            d1  = FIXED_SCALE_TP1_USD  / PT_VAL
+            d2  = FIXED_SCALE_TP2_USD  / PT_VAL
+            if sl:
+                sp = round((ep - sd) / TICK) * TICK
+                t1 = round((ep + d1) / TICK) * TICK
+                t2 = round((ep + d2) / TICK) * TICK
+            else:
+                sp = round((ep + sd) / TICK) * TICK
+                t1 = round((ep - d1) / TICK) * TICK
+                t2 = round((ep - d2) / TICK) * TICK
+        elif FIXED_BRACKET:
+            # [FIXED_BRACKET] fixed tick distances; t2==t1 (single OCO target,
+            # no partial). Skips the ATR / VP / sanity machinery below.
+            sd = FIXED_STOP_TICKS   * TICK
+            td = FIXED_TARGET_TICKS * TICK
+            if sl:
+                sp = round((ep - sd) / TICK) * TICK
+                t1 = t2 = round((ep + td) / TICK) * TICK
+            else:
+                sp = round((ep + sd) / TICK) * TICK
+                t1 = t2 = round((ep - td) / TICK) * TICK
+        elif sel == 5 and m6_sp:
             sp, t1, t2 = m6_sp, m6_t1, m6_t2
         elif sel == 7 and fade_active:
             sp, t1, t2 = fd_sp, fd_t1, fd_t2
@@ -2261,7 +2528,8 @@ class Backtester:
                 if not sl and m7_stop < sp: sp = round(m7_stop / TICK) * TICK
 
         # [vp-targets] Override T1/T2 with VP levels (per-target ATR fallback).
-        if VP_TARGETS and self.vp_v[i].valid and atr > 0:
+        if VP_TARGETS and not FIXED_BRACKET and not FIXED_SCALE \
+                and self.vp_v[i].valid and atr > 0:
             lvls = sorted(lv for lv in (self.vp_v[i].poc, self.vp_v[i].vah,
                                         self.vp_v[i].val)
                           if lv > 0)
@@ -2314,7 +2582,10 @@ class Backtester:
             time       = bar.dt.strftime("%H:%M:%S"),
             event      = "SETUP",
             side       = "LONG" if sl else "SHORT",
-            mode       = MODE_NAMES[sel],
+            # [M4-OR levels] label OR-sourced M4 arms "M4o" so per-mode tables
+            # attribute them separately. sel stays 3 — floors/gates unaffected.
+            mode       = ("M4o" if (sel == 3 and self._m4_or_only)
+                          else MODE_NAMES[sel]),
             entry      = round(ep, 2),
             sl         = round(sp, 2),
             tp1        = round(t1, 2),
@@ -2342,6 +2613,90 @@ class Backtester:
         self.cur_trade = t
         self.out.append(t)
         self.day_trades += 1
+
+    # ──────────────────────────────────────────────────────────────────────────
+    def _vwap_touch(self, i: int, bar: Bar, atr: float, vwap: float):
+        """[VWAP_TOUCH_TRIGGER] Place an order at every fresh return to the
+        (anchored) VWAP: long if the VWAP is rising, short if falling. Bypasses
+        the M1..M8 cascade; reuses the standard ATR stop + T1/T2 + trail exit."""
+        if vwap <= 0 or atr <= 0:                                   return
+        if self.day_trades >= MAX_TRADES:                           return
+        if self._vt_last_bar >= 0 and i - self._vt_last_bar < VWAP_TOUCH_COOL:
+            return
+        # Proximity band, measured in VWAP standard deviations (VWAP_NEAR_SD) if
+        # set, else in fixed points (VWAP_NEAR_PTS).
+        if VWAP_NEAR_SD > 0:
+            vsd = self.vwap_sd[i]
+            if vsd <= 0:                                            return
+            thresh = VWAP_NEAR_SD * vsd
+        else:
+            thresh = VWAP_NEAR_PTS
+        # This bar closes within the band …
+        if abs(bar.close - vwap) > thresh:                          return
+        # … and it's a FRESH return — the prior bar was OUTSIDE the band — so we
+        # fire once per pullback, not every bar price sits on the VWAP.
+        if i >= 1:
+            pv = self.vwap_v[i - 1]
+            if VWAP_NEAR_SD > 0:
+                pvsd = self.vwap_sd[i - 1]
+                pthr = VWAP_NEAR_SD * pvsd if pvsd > 0 else thresh
+            else:
+                pthr = VWAP_NEAR_PTS
+            if pv > 0 and abs(self.bars[i - 1].close - pv) <= pthr:
+                return
+        # Direction from the VWAP slope over the lookback (rising→long, fall→short)
+        lb = VWAP_TOUCH_SLOPE_LB
+        if i < lb:                                                  return
+        pv_lb = self.vwap_v[i - lb]
+        if pv_lb <= 0:                                              return
+        slope = vwap - pv_lb
+        tol   = atr * VWAP_TOUCH_SLOPE_TOL
+        if   slope >  tol: sl = True     # rising VWAP → long the pullback
+        elif slope < -tol: sl = False    # falling VWAP → short the reject
+        else:              return        # flat VWAP → no trend, skip
+
+        # Pullback-from-trend-side gate: the prior (out-of-band) bar must be on
+        # the trend side — above the VWAP for a long, below it for a short — so we
+        # take a pullback INTO the VWAP, not a momentum cross THROUGH it.
+        if VWAP_TOUCH_PULLBACK and i >= 1:
+            pv = self.vwap_v[i - 1]
+            pc = self.bars[i - 1].close
+            if pv <= 0:                                             return
+            if sl and pc <= pv:                                     return
+            if (not sl) and pc >= pv:                               return
+
+        # Delta (order-flow) confirmation: at least VWAP_TOUCH_DELTA_MIN of the
+        # last 5 bars must lean the trade's way (buyers for long, sellers short).
+        if VWAP_TOUCH_DELTA_MIN > 0:
+            lo = max(0, i - 4)
+            if sl:
+                sc = sum(1 for j in range(lo, i + 1)
+                         if self.bars[j].ask_vol > self.bars[j].bid_vol)
+            else:
+                sc = sum(1 for j in range(lo, i + 1)
+                         if self.bars[j].bid_vol > self.bars[j].ask_vol)
+            if sc < VWAP_TOUCH_DELTA_MIN:                           return
+
+        div = divergence(self.bars, i, self.cum_d, atr)
+
+        # Absorption / delta-divergence gate: require signed divergence strength
+        # to back the trade — for a LONG, bullish absorption (price dips to VWAP
+        # but delta holds / down-bars carry buy-delta = sellers absorbed); for a
+        # SHORT, the bearish mirror. This is the OPPOSITE of delta confirmation:
+        # we want the pullback's flow to be FAILING, not agreeing. strength maps
+        # trend_div=±2, swing_div=±2, persist_abs=±1 (range −5..+5).
+        if VWAP_TOUCH_ABSORB > 0:
+            if sl and div.strength < VWAP_TOUCH_ABSORB:             return
+            if (not sl) and div.strength > -VWAP_TOUCH_ABSORB:      return
+
+        self.funnel["armed"] += 1
+        self._enter(i, bar, 2, sl, atr, 6, 0, div,
+                    0, 0, 0, False, 0.0, 0,
+                    0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        if self.in_pos and self.cur_trade is not None:
+            self.cur_trade.mode = "VT"    # relabel the M3 slot as the touch engine
+            self.funnel["entered"] += 1
+            self._vt_last_bar = i
 
     # ──────────────────────────────────────────────────────────────────────────
     # Hook fired when inst_risk.rm < C_RM_FLOOR kills a SETUP. Default is a
@@ -2401,6 +2756,15 @@ class Backtester:
         fav = bar.high - self.entry_px if il else self.entry_px - bar.low
         self._mae = max(self._mae, adv)
         self._mfe = max(self._mfe, fav)
+
+        # [FIXED_BRACKET] pure held-to-stop/target OCO — no CB/trail/BE/scratch.
+        if FIXED_BRACKET:
+            self._manage_fixed(i, bar); return
+
+        # [FIXED_SCALE] 2-lot fixed OCO — same "nothing to manage" contract as
+        # FIXED_BRACKET, so it also bypasses CB / half-MFE / scratch / trail.
+        if FIXED_SCALE:
+            self._manage_fixed_scaled(i, bar); return
 
         # Circuit-breaker
         op = (bar.close - self.entry_px) if il else (self.entry_px - bar.close)
@@ -2533,8 +2897,98 @@ class Backtester:
         self.lots_open = 0; self._realized = 0.0
 
     # ──────────────────────────────────────────────────────────────────────────
+    def _manage_fixed(self, i: int, bar: Bar):
+        """[FIXED_BRACKET] Whole-position OCO: fixed stop / fixed target, held to
+        one or the other. The attached bracket goes live at the entry-bar close,
+        so exits are checked from the next bar on. When both the stop and target
+        lie inside one bar's range we assume the STOP filled first (conservative;
+        we can't see intrabar sequence from OHLC). FIXED_PROFIT_LOCK / _LOSS_LOCK
+        model the cpp daily caps that include OpenProfitLoss — they act as a
+        de-facto tighter target/stop when the $ threshold is nearer than the tick
+        bracket."""
+        il = self.is_long
+        if i <= self.entry_bar:                       # fills at entry-bar close
+            return
+
+        stop_px = self.stop_px
+        tgt_px  = self.tp1_px
+        stop_rsn, tgt_rsn = "STOP", "T2"
+
+        # Open-P&L profit lock → de-facto target at the $ threshold price.
+        if FIXED_PROFIT_LOCK > 0 and self.qty > 0:
+            lock_pts = FIXED_PROFIT_LOCK / (PT_VAL * self.qty)
+            lock_px  = round((self.entry_px + lock_pts) / TICK) * TICK if il \
+                       else round((self.entry_px - lock_pts) / TICK) * TICK
+            if (il and lock_px < tgt_px) or ((not il) and lock_px > tgt_px):
+                tgt_px, tgt_rsn = lock_px, "DAILY_PROFIT"
+        # Open-P&L loss lock → de-facto tighter stop at the $ threshold price.
+        if FIXED_LOSS_LOCK > 0 and self.qty > 0:
+            lock_pts = FIXED_LOSS_LOCK / (PT_VAL * self.qty)
+            lock_px  = round((self.entry_px - lock_pts) / TICK) * TICK if il \
+                       else round((self.entry_px + lock_pts) / TICK) * TICK
+            if (il and lock_px > stop_px) or ((not il) and lock_px < stop_px):
+                stop_px, stop_rsn = lock_px, "DAILY_LOSS"
+
+        stop_hit = (bar.low <= stop_px) if il else (bar.high >= stop_px)
+        tgt_hit  = (bar.high >= tgt_px) if il else (bar.low  <= tgt_px)
+        if stop_hit:                                  # conservative: stop wins ties
+            self._close(i, stop_px, stop_rsn); return
+        if tgt_hit:
+            self._close(i, tgt_px, tgt_rsn); return
+
+    def _manage_fixed_scaled(self, i: int, bar: Bar):
+        """[FIXED_SCALE] 2-lot fixed OCO: lot1 -> TP1, runner -> TP2, one shared
+        stop. No trail, no scratch, no circuit-breaker — the whole bracket is
+        attached at the entry-bar close, so exits are checked from the next bar
+        on (same convention as _manage_fixed).
+
+        Tie-breaking is conservative throughout, since OHLC hides the intrabar
+        sequence: when a bar's range spans both the stop and a target, the STOP
+        is assumed to have filled first and the whole position exits there.
+
+        With FIXED_SCALE_BE the shared stop moves to breakeven once TP1 fills,
+        but only from the FOLLOWING bar — booking the partial and re-arming the
+        stop inside the same bar would be free look-ahead."""
+        il = self.is_long
+        if i <= self.entry_bar:                       # fills at entry-bar close
+            return
+
+        stop_hit = (bar.low <= self.stop_px) if il else (bar.high >= self.stop_px)
+        if stop_hit:                                  # conservative: stop wins ties
+            # Pre-TP1 this takes both lots; post-TP1 only the runner is left, and
+            # _close bills whatever lots_open still holds.
+            self._close(i, self.stop_px, "STOP" if not self.t1_hit else
+                        ("BE" if FIXED_SCALE_BE else "STOP"))
+            return
+
+        if not self.t1_hit:
+            hit1 = (bar.high >= self.tp1_px) if il else (bar.low  <= self.tp1_px)
+            hit2 = (bar.high >= self.tp2_px) if il else (bar.low  <= self.tp2_px)
+            # Single-lot degenerate case: there is no runner to peel, so TP1 IS
+            # the whole exit. Peeling here would drop lots_open to 0 while the
+            # position stayed open, and _close's `or 1` fallback would then bill
+            # a SECOND lot at the eventual exit -- double-booking every winner.
+            if self.qty < 2:
+                if hit1: self._close(i, self.tp1_px, "T1")
+                return
+            if hit1 and hit2:                         # bar blew through both legs
+                self._peel(self.tp1_px, 1)
+                self._close(i, self.tp2_px, "T2"); return
+            if hit1:                                  # book lot1, runner lives on
+                self._peel(self.tp1_px, 1)
+                self.t1_hit = True; self.t1_bar = i
+                if FIXED_SCALE_BE:
+                    self.stop_px = round(self.entry_px / TICK) * TICK
+            return
+
+        # Runner: hard TP2 only — no trail (the bracket is untouched by design).
+        if (bar.high >= self.tp2_px) if il else (bar.low <= self.tp2_px):
+            self._close(i, self.tp2_px, "T2"); return
+
     def _lot_count(self) -> int:
         """Contracts for this entry (1 unless SCALE_OUT)."""
+        if FIXED_SCALE:   return FIXED_SCALE_QTY
+        if FIXED_BRACKET: return FIXED_QTY
         if not SCALE_OUT: return 1
         if SIZE_BY_RM:    return max(1, int(round(BASE_QTY * self.risk.rm)))
         return BASE_QTY
