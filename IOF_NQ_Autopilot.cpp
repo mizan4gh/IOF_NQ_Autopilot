@@ -19,6 +19,7 @@ SCDLLName("IOF_NQ_Autopilot")
 //  IOF NQ — Pure Orderflow Autopilot
 //  Sierra Chart ACSIL Study
 //
+//  Version: v12.39 (July 2026; transient-skip order retry + reject env capture — LOGGING/PLUMBING ONLY, no strategy change)
 //  Version: v12.38 (June 2026; M8 Fade Engine quality floor 50->60, sheds losing Q<=50 type-2 fades)
 //  Version: v12.37 (June 2026; early-scratch exit: abandon dead pre-T1 trades at stop-eligibility bar)
 //
@@ -123,6 +124,29 @@ SCDLLName("IOF_NQ_Autopilot")
 //    [v12.22] M5 (Trap Reversal) mode restored. All modes active: M1–M8.
 //             Phase-3 trap progression and M5 signal block reinstated from v12.20
 //             state (reclaim-reset, phase-3 timeout, DL/DS-only entry, ctrl>=0 gate).
+//
+//    [v12.39] Transient-skip order retry + reject environment capture.
+//             LOGGING/PLUMBING ONLY — no entry, exit, sizing or gate logic
+//             changes, so no cross-contract A/B was required.
+//             (a) Sierra returns SCT_SKIPPED_* (-8994..-8999) when it declines
+//                 to SUBMIT an order — the order never reaches the broker.
+//                 These are NOT broker rejections. Live 2026-07-21: four
+//                 qualifying M4 setups all returned -8999 (DOWNLOADING_
+//                 HISTORICAL_DATA) after a mid-session reload, and the day
+//                 traded nothing. Now the exact bracket is parked and replayed
+//                 verbatim for <=C_RETRY_MAX_BARS(2) bars while price stays
+//                 within C_RETRY_DRIFT_TICKS(4). Retries -8999/-8998/-8997/
+//                 -8995 only; -8994 (auto-trading off = user intent), -8996
+//                 (a bug) and all non-skip codes incl. -1 are NOT retried.
+//                 Kept tight on purpose: re-pricing the entry would be the
+//                 delayed/retest M4 entry already falsified — the immediate
+//                 fade at the rejection close IS the edge.
+//             (b) Every reject now logs acct / ServerConnectionState /
+//                 sim-mode / sendToService to the message log AND the CSV
+//                 reason field (pipe-delimited — ExitR is written raw via %s,
+//                 so a comma would shift every later column). Motivated by
+//                 2026-07-24's two order_rc=-1 on well-formed orders, whose
+//                 cause was unrecoverable after the fact.
 //
 //    [v12.37] Early-scratch exit. On the first bar the stop becomes eligible
 //             (Idx==EntryBar+4), a pre-T1 trade whose MFE never reached 25%
