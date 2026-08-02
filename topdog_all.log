@@ -1,0 +1,10 @@
+TopDog Cycle — 5m bars, EMA15/SMA50, Stoch(3,5,2) 20/80, swing6 stop, 2.0R target, slip=0.0t
+  NQU25    bars= 20,212  n= 107  WR= 33.6%  PF= 0.88  Net=    -3,200  MaxDD=   -5,910  t=-0.55  {'STOP': 69, 'TARGET': 34, 'FLAT_BY': 4}
+  NQZ25    bars= 20,144  n=  84  WR= 38.1%  PF= 1.03  Net=      +665  MaxDD=   -6,980  t=+0.12  {'STOP': 50, 'TARGET': 29, 'FLAT_BY': 5}
+  NQM5     bars= 20,176  n=  86  WR= 33.7%  PF= 0.96  Net=    -1,075  MaxDD=   -5,380  t=-0.19  {'STOP': 55, 'TARGET': 27, 'FLAT_BY': 4}
+  NQH6     bars= 19,705  n=  71  WR= 33.8%  PF= 1.07  Net=    +1,380  MaxDD=   -4,345  t=+0.25  {'TARGET': 23, 'STOP': 46, 'FLAT_BY': 2}
+  NQM6     bars= 20,092  n=  65  WR= 41.5%  PF= 1.50  Net=    +8,690  MaxDD=   -3,130  t=+1.42  {'STOP': 38, 'TARGET': 24, 'FLAT_BY': 3}
+  NQU26    bars=  5,736  n=  19  WR= 31.6%  PF= 0.63  Net=    -2,490  MaxDD=   -4,060  t=-0.89  {'STOP': 13, 'TARGET': 6}
+----------------------------------------------------------------------------------------------------
+  POOLED  n=432  PF=1.03  Net=+3,970
+  contracts net>0 & PF>1: 3/6  -> FAIL (ship gate)
