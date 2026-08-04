@@ -2348,17 +2348,21 @@ class Backtester:
             self.funnel["m1_extra"] += 1
             self.funnel_audit.append((bar.dt, _mname, "m1_extra", ""))
             return
-        if sel == 0:  # M1 directional trend gate: don't buy into downtrend / sell into uptrend
-            lb20 = min(20, i)
-            pc20 = bar.close - self.bars[i - lb20].close if lb20 > 0 else 0.0
-            if sl  and pc20 < -atr * 0.5:   # LONG into falling market
+        # M1 directional trend gate: don't buy into a downtrend / sell into an uptrend.
+        # [armdiag fix] The `return` used to sit at the same indent as the LONG
+        # test rather than inside it, so EVERY M1 selection returned and M1 never
+        # took a trade in any run from this harness; the SHORT test and the second
+        # return below it were unreachable. Faithful port of the cpp gate at
+        # IOF_NQ_Autopilot.cpp:3797-3806, including its ATR>0 / Idx>=20 guard and
+        # its fixed 20-bar lookback (the old min(20, i) diverged for i < 20).
+        if sel == 0 and atr > 0 and i >= 20:
+            pc20 = bar.close - self.bars[i - 20].close
+            if (sl and pc20 < -atr * 0.5) or (not sl and pc20 > atr * 0.5):
                 self.funnel["m1_extra"] += 1
-            self.funnel_audit.append((bar.dt, _mname, "m1_extra", ""))
-            return
-            if not sl and pc20 >  atr * 0.5:  # SHORT into rising market
-                self.funnel["m1_extra"] += 1
-            self.funnel_audit.append((bar.dt, _mname, "m1_extra", ""))
-            return
+                self.funnel_audit.append((bar.dt, _mname, "m1_extra",
+                                          f"pc20={pc20:.2f} atr={atr:.2f} "
+                                          f"side={'L' if sl else 'S'}"))
+                return
 
         # ── RM floor ─────────────────────────────────────────────────────────
         # [v12.32-ab] Gate by full RM model (mirrors cpp line 3453). The legacy
