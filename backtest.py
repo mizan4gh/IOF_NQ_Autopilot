@@ -147,32 +147,6 @@ C_M5_COOLDOWN   = 15   # bars between M5 arms
 C_M5_PHASE3_MAX = 20   # max bars in phase 3 before reset
 C_VWAP_SLP_LB   = 20   # [v12.22] VWAP slope lookback for M1 directional filter
 C_VWAP_SLP_TOL  = 0.02 # [v12.22] M1 VWAP slope tolerance as ATR fraction (tight)
-QUAL_FLOOR_M5 = None  # if set, overrides QUAL_FLOOR for M5 (sel==4) only — used by backtest_m5m7_floor_ab.py
-QUAL_FLOOR_M6 = None  # if set, overrides QUAL_FLOOR for M6 (sel==5) only
-QUAL_FLOOR_M7 = None  # if set, overrides QUAL_FLOOR for M7 (sel==6) only — used by backtest_m5m7_floor_ab.py
-QUAL_FLOOR_M8 = None  # if set, overrides QUAL_FLOOR for M8 (sel==7) only
-C_MIN_SC_M1  = 3
-C_MIN_SC_ALL = 3
-C_COOL_TRADE = 5
-C_COOL_LOSS  = 10
-C_COOL_STOP  = 10
-C_OPEN_COOL  = 36
-C_SPIKE_ATR_M  = 3.0   # bar range spike: range >= 3x ATR
-C_VCOOL_THRESH = 7.0   # deep vol-cool: range/ATR >= 7 triggers extended pause
-C_VCOOL_PAUSE  = 40    # bars suppressed by deep vol cooldown
-C_SPIKE_COOL   = 20    # bars suppressed by range/delta spike state
-C_VWAP_MAT   = 40
-C_DELTA_MAT  = 25
-C_CONSOL_LB  = 25
-C_CONSOL_ATR = 1.5
-C_SWEEP_LB   = 15
-C_MAX_LOSSES = 2
-C_STRUCT_LB  = 25
-C_M5_MIN_SC     = 3    # min score to arm M5
-C_M5_COOLDOWN   = 15   # bars between M5 arms
-C_M5_PHASE3_MAX = 20   # max bars in phase 3 before reset
-C_VWAP_SLP_LB   = 20   # [v12.22] VWAP slope lookback for M1 directional filter
-C_VWAP_SLP_TOL  = 0.02 # [v12.22] M1 VWAP slope tolerance as ATR fraction (tight)
 
 # [M2 geometry partition] M2 is the VP-level trigger, and its arm condition
 # (bar.low <= lv + TICK) is a SUPERSET: it fires both when price merely grazes the
@@ -689,6 +663,11 @@ class VP5Day:
     NBINS   = 800
     VA_PCT  = 0.70
     N_DAYS  = 5
+    # [score-port] cpp VP_50_DAYS / SP_MAX_ZONES / SP_VOL_THRESH
+    # (Autopilot.cpp:825-826, :842).
+    N_DAYS_50      = 50
+    SP_MAX_ZONES   = 32
+    SP_VOL_THRESH  = 0.15
 
     def __init__(self):
         self._days: list = []
@@ -697,6 +676,20 @@ class VP5Day:
         self._cur_bins   = np.zeros(self.NBINS)
         self.poc = self.vah = self.val = 0.0
         self.valid = False
+        # [score-port] 50-day composite (S10) + single-print zones (S7).
+        self.poc50 = self.vah50 = self.val50 = 0.0
+        self.valid50 = False
+        self.sp_zones: list = []   # [lo, hi, filled]
+        self._n = 0                # bar counter driving the recompute cadence
+
+    def near_single_print(self, px: float, tol: float) -> bool:
+        """Port of cpp nearSinglePrint() (:982-988)."""
+        for z in self.sp_zones:
+            if z[2]:
+                continue
+            if z[0] - tol <= px <= z[1] + tol:
+                return True
+        return False
 
     def _b2p(self, b: int, base: float) -> float:
         return base + (b - self.NBINS // 2) * self.BIN
@@ -706,7 +699,8 @@ class VP5Day:
                           int((px - base) / self.BIN) + self.NBINS // 2))
 
     def update(self, bar: Bar):
-        if bar.date_tag != self._cur_date:
+        new_day = bar.date_tag != self._cur_date
+        if new_day:
             if self._cur_date > 0 and self._cur_base > 0:
                 self._days.append((self._cur_date, self._cur_base, self._cur_bins.copy()))
                 if len(self._days) > 50:
@@ -722,13 +716,34 @@ class VP5Day:
         bh = self._p2b(bar.high, self._cur_base)
         per = bar.volume / max(1, bh - bl + 1)
         self._cur_bins[bl:bh + 1] += per
-        self._compute()
 
-    def _compute(self):
-        days = self._days[-self.N_DAYS:]
+        # [score-port] Recompute cadence is a faithful port of cpp:2357-2361:
+        #   computeLevels5()  — every 10 bars, or at session start
+        #   computeLevels50() — only when VP50Pending (set at day rollover, :2296)
+        # Both composites read ONLY completed days (never _cur_bins), so a per-bar
+        # recompute changes nothing and is pure cost. Recomputing the 50-day every
+        # bar was ~1000x the cpp's work and is what stalled the 6-contract run.
+        # It also matters for correctness: _compute_composite resets the
+        # single-print zones, so recomputing per bar would discard the fills that
+        # update_single_prints() accumulates between recomputes.
+        self._n += 1
+        if new_day or self._n % 10 == 0:
+            self.poc, self.vah, self.val, self.valid = \
+                self._compute_composite(self.N_DAYS)
+        if new_day:
+            self.poc50, self.vah50, self.val50, self.valid50 = \
+                self._compute_composite(self.N_DAYS_50)
+
+    def _compute_composite(self, n_days: int):
+        """Port of cpp computeComposite() (Autopilot.cpp:900-966).
+
+        Returns (poc, vah, val, valid). Single-print zones are detected only on
+        the <=5-day composite, matching the cpp's `if(numDays <= VP_5_DAYS)`
+        guard — the 50-day composite is too dense to leave meaningful gaps.
+        """
+        days = self._days[-n_days:]
         if not days:
-            self.valid = False
-            return
+            return 0.0, 0.0, 0.0, False
         bases  = [d[1] for d in days]
         g_base = round(sum(bases) / len(bases) / self.BIN) * self.BIN
         comp   = np.zeros(self.NBINS)
@@ -741,10 +756,9 @@ class VP5Day:
                 comp[cb] += dbins[b]
         total = comp.sum()
         if total <= 0:
-            self.valid = False
-            return
+            return 0.0, 0.0, 0.0, False
         poc_b = int(np.argmax(comp))
-        self.poc = self._b2p(poc_b, g_base)
+        poc   = self._b2p(poc_b, g_base)
         va_target = total * self.VA_PCT
         va_vol = comp[poc_b]
         lo = hi = poc_b
@@ -759,9 +773,51 @@ class VP5Day:
                 lo -= 1; va_vol += comp[lo]
             else:
                 break
-        self.vah   = self._b2p(hi, g_base)
-        self.val   = self._b2p(lo, g_base)
-        self.valid = True
+        vah = self._b2p(hi, g_base)
+        val = self._b2p(lo, g_base)
+
+        if n_days <= self.N_DAYS:
+            self._detect_single_prints(comp, lo, hi, g_base, float(comp[poc_b]))
+        return poc, vah, val, True
+
+    def _detect_single_prints(self, comp, lo: int, hi: int,
+                              g_base: float, max_vol: float):
+        """Port of the SP block inside cpp computeComposite (:937-966).
+
+        Walks the value area for runs of low-but-nonzero volume bins and records
+        each run >= 1.0 point wide as an unfilled zone (score component S7).
+        """
+        self.sp_zones = []
+        if max_vol <= 0:
+            return
+        thresh = max_vol * self.SP_VOL_THRESH
+        in_sp  = False
+        sp_lo  = 0.0
+        for b in range(lo, hi + 1):
+            if len(self.sp_zones) >= self.SP_MAX_ZONES:
+                return
+            if 0.0 < comp[b] < thresh:
+                if not in_sp:
+                    in_sp = True
+                    sp_lo = self._b2p(b, g_base)
+            elif in_sp:
+                sp_hi = self._b2p(b - 1, g_base)
+                if sp_hi - sp_lo >= 1.0:
+                    self.sp_zones.append([sp_lo, sp_hi, False])
+                in_sp = False
+        if in_sp and len(self.sp_zones) < self.SP_MAX_ZONES:
+            sp_hi = self._b2p(hi, g_base)
+            if sp_hi - sp_lo >= 1.0:
+                self.sp_zones.append([sp_lo, sp_hi, False])
+
+    def update_single_prints(self, hi: float, lo: float, vol: float):
+        """Port of cpp updateSinglePrints() (:974-980) — a bar trading through an
+        unfilled zone fills it, which retires it from scoring."""
+        for z in self.sp_zones:
+            if z[2]:
+                continue
+            if lo <= z[1] and hi >= z[0] and vol > 0:
+                z[2] = True
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  CONTROL SCORE
@@ -775,13 +831,239 @@ class _VPView:
     Snapshotting each bar's levels during the pre-compute pass is what makes the
     read causal. LIVE cpp recomputes inside its per-bar loop and was never wrong.
     """
-    __slots__ = ("poc", "vah", "val", "valid")
+    __slots__ = ("poc", "vah", "val", "valid",
+                 "poc50", "vah50", "val50", "valid50", "sp_zones")
 
-    def __init__(self, poc: float, vah: float, val: float, valid: bool):
+    def __init__(self, poc: float, vah: float, val: float, valid: bool,
+                 poc50: float = 0.0, vah50: float = 0.0, val50: float = 0.0,
+                 valid50: bool = False, sp_zones=()):
         self.poc = poc
         self.vah = vah
         self.val = val
         self.valid = valid
+        # [score-port] S10 needs the 50-day levels and S7 the single-print zones;
+        # both must be snapshotted per bar for exactly the same reason the 5-day
+        # levels are — reading the live VP5Day would leak end-of-file state.
+        self.poc50 = poc50
+        self.vah50 = vah50
+        self.val50 = val50
+        self.valid50 = valid50
+        self.sp_zones = sp_zones
+
+    def near_single_print(self, px: float, tol: float) -> bool:
+        for z in self.sp_zones:
+            if z[2]:
+                continue
+            if z[0] - tol <= px <= z[1] + tol:
+                return True
+        return False
+
+
+class IntradayLevels:
+    """[score-port] Port of the cpp IntradayState feeding score component S9
+    (Autopilot.cpp:3129-3139): prior session O/H/L/C plus the current session's
+    open. Rolls on date_tag exactly like the cpp DAY RESET block (:2197-2212).
+    """
+    __slots__ = ("prev_open", "prev_high", "prev_low", "prev_close",
+                 "curr_open", "valid", "_date", "_hi", "_lo", "_open", "_close")
+
+    def __init__(self):
+        self.prev_open = self.prev_high = 0.0
+        self.prev_low = self.prev_close = 0.0
+        self.curr_open = 0.0
+        self.valid = False
+        self._date = -1
+        self._hi = self._lo = self._open = self._close = 0.0
+
+    def update(self, bar):
+        if bar.date_tag != self._date:
+            if self._date > 0:
+                self.prev_open, self.prev_high = self._open, self._hi
+                self.prev_low, self.prev_close = self._lo, self._close
+                self.valid = True
+            self._date = bar.date_tag
+            self._open = self._hi = self._lo = bar.open
+            self.curr_open = bar.open
+        if bar.high > self._hi: self._hi = bar.high
+        if bar.low  < self._lo: self._lo = bar.low
+        self._close = bar.close
+
+    def levels(self):
+        return (self.prev_open, self.prev_high, self.prev_low,
+                self.prev_close, self.curr_open)
+
+    def snapshot(self):
+        """Frozen per-bar view. Needed for the same reason _VPView exists: the
+        live object is advanced across every bar in the pre-compute pass, so the
+        strategy loop must not read it directly."""
+        return _IDLView(self.valid, self.levels())
+
+
+class _IDLView:
+    __slots__ = ("valid", "_levels")
+
+    def __init__(self, valid: bool, levels: tuple):
+        self.valid = valid
+        self._levels = levels
+
+    def levels(self):
+        return self._levels
+
+
+def iceberg_state(bars, i: int, atr: float, ice_ratio: float = 1.3):
+    """[score-port] Port of the cpp ICEBERG block (Autopilot.cpp:2803-2821),
+    feeding score component S8. Returns (bid_ice_px, ask_ice_px); 0.0 = absent.
+
+    Five-bar price compression (< 0.5 ATR) carrying > 7.5x the current bar's
+    volume, with one side dominating by `ice_ratio`, marks resting size.
+    """
+    if i < 5 or atr <= 0:
+        return 0.0, 0.0
+    px_min = bars[i].low
+    px_max = bars[i].high
+    tot_ask = tot_bid = 0.0
+    for k in range(5):
+        b = bars[i - k]
+        if b.low  < px_min: px_min = b.low
+        if b.high > px_max: px_max = b.high
+        tot_ask += b.ask_vol
+        tot_bid += b.bid_vol
+    rng = px_max - px_min
+    if not (0.0 < rng < atr * 0.5):
+        return 0.0, 0.0
+    if (tot_ask + tot_bid) <= bars[i].volume * 5.0 * 1.5:
+        return 0.0, 0.0
+    mid = (px_min + px_max) * 0.5
+    bid_px = mid if tot_bid > tot_ask * ice_ratio else 0.0
+    ask_px = mid if tot_ask > tot_bid * ice_ratio else 0.0
+    return bid_px, ask_px
+
+
+def directional_score(bars, i, atr, vwap, vsd, vp, idl, div, trap,
+                      avgd, delta_mature, bull, bear, ice_bid_px, ice_ask_px):
+    """[score-port] Faithful port of the cpp SCORING block (Autopilot.cpp:3100-3164).
+
+    Returns (sc_l, sc_s, lb_sc_l, lb_sc_s).
+
+    Replaces the harness's previous stand-in — a count of confirming delta bars
+    over the last 5 — which was a DIFFERENT quantity from the cpp's scL/scS, not
+    a coarser version of it. Because it was structurally capped at 5 and M4/M5/M6
+    quality is `score * 10`, M4 could never exceed a quality of 50 and so could
+    never clear QUAL_FLOOR=50: it armed 305 times across the 6 frozen contracts
+    and took 2 trades. The same value also feeds every mode's arm threshold
+    (C_MIN_SC_ALL / C_MIN_SC_M1), which were calibrated against the cpp's
+    12-component score, so the mismatch was systemic rather than M4-specific.
+    """
+    bar   = bars[i]
+    close = bar.close
+    prev  = bars[i - 1] if i > 0 else bar
+    dlt   = bar.ask_vol - bar.bid_vol
+
+    # S2 — bonus: this bar's delta is at least half the EMA-64 of |delta|.
+    s2 = 1 if abs(dlt) >= avgd * 0.5 else 0
+
+    # S3 — near 5-day VP value area / POC.
+    s3l = s3s = 0
+    if vp is not None and vp.valid and atr > 0:
+        z = atr * 0.75
+        n_poc = abs(close - vp.poc) <= z
+        if abs(close - vp.val) <= z or (n_poc and close > vp.poc): s3l = 1
+        if abs(close - vp.vah) <= z or (n_poc and close < vp.poc): s3s = 1
+
+    # S1 — side of session VWAP.
+    s1l = 1 if (vwap > 0 and close > vwap) else 0
+    s1s = 1 if (vwap > 0 and close < vwap) else 0
+
+    # S4 — VWAP +/-2sd band rejection (2 pts) else wrong-side-of-VWAP (1 pt).
+    vb2u = vwap + vsd * 2 if vsd > 0 else 0.0
+    vb2l = vwap - vsd * 2 if vsd > 0 else 0.0
+    uob_rej = vb2u > 0 and bar.high >= vb2u and close < vb2u and close < prev.close
+    lob_bnc = vb2l > 0 and bar.low  <= vb2l and close > vb2l and close > prev.close
+    s4l = 2 if lob_bnc else (1 if (vwap > 0 and close < vwap) else 0)
+    s4s = 2 if uob_rej else (1 if (vwap > 0 and close > vwap) else 0)
+
+    # S5 — swept the prior bar's extreme and closed back through it.
+    sweep_min = atr * 0.15
+    s5l = 1 if (bar.low  < prev.low  - sweep_min and close > prev.low
+                and close > prev.close) else 0
+    s5s = 1 if (bar.high > prev.high + sweep_min and close < prev.high
+                and close < prev.close) else 0
+
+    # S6 — prior bar's body opposed its delta (absorption).
+    s6l = s6s = 0
+    if i > 0:
+        d1a = prev.ask_vol - prev.bid_vol
+        s6l = 1 if (prev.close <= prev.open and d1a > 0) else 0
+        s6s = 1 if (prev.close >= prev.open and d1a < 0) else 0
+
+    # S7 — near an unfilled single-print zone (non-directional).
+    s7 = 1 if (vp is not None and atr > 0
+               and vp.near_single_print(close, atr * 0.5)) else 0
+
+    # S8 — resting iceberg within half an ATR.
+    s8l = 1 if (ice_bid_px > 0 and atr > 0
+                and abs(close - ice_bid_px) <= atr * 0.5) else 0
+    s8s = 1 if (ice_ask_px > 0 and atr > 0
+                and abs(close - ice_ask_px) <= atr * 0.5) else 0
+
+    # S9 — accepted through a prior-session level.
+    s9l = s9s = 0
+    if idl is not None and idl.valid and atr > 0:
+        id_z = atr * 0.5
+        for lv in idl.levels():
+            if lv <= 0 or abs(close - lv) > id_z:
+                continue
+            if close > lv and bull: s9l = 1
+            if close < lv and bear: s9s = 1
+
+    # S10 — near the 50-day composite value area / POC.
+    s10l = s10s = 0
+    if vp is not None and vp.valid50 and atr > 0:
+        z50 = atr * 0.75
+        if abs(close - vp.poc50) <= z50:
+            if close > vp.poc50: s10l = 1
+            if close < vp.poc50: s10s = 1
+        if abs(close - vp.val50) <= z50 and close > vp.val50: s10l = 1
+        if abs(close - vp.vah50) <= z50 and close < vp.vah50: s10s = 1
+
+    # S11 — a confirmed trap in the opposing direction is worth 2.
+    trap_conf = trap is not None and trap.phase >= 2
+    s11l = 2 if (trap_conf and trap.direction == -1) else 0
+    s11s = 2 if (trap_conf and trap.direction == +1) else 0
+
+    # S12 — cumulative-delta divergence strength.
+    s12l = s12s = 0
+    if delta_mature and div is not None:
+        if div.strength >= 2: s12l = 1
+        if div.strength >= 4: s12l = 2
+        if div.strength <= -2: s12s = 1
+        if div.strength <= -4: s12s = 2
+
+    b_l = s4l + s1l + s3l + s5l + s6l + s7 + s8l + s9l + s10l + s11l + s12l
+    b_s = s4s + s1s + s3s + s5s + s6s + s7 + s8s + s9s + s10s + s11s + s12s
+
+    # cpp:3163-3164 — the score is gated on delta direction. DL/DS use this
+    # bar's delta; the lean-back variants use the C_DELTA_LB-bar sum, and both
+    # carry the same b_l/b_s body.
+    d_l = dlt > 0
+    d_s = dlt < 0
+    lb_delta = 0.0
+    if C_DELTA_LB > 0:
+        for k in range(C_DELTA_LB):
+            if i - k < 0:
+                break
+            lb_delta += bars[i - k].ask_vol - bars[i - k].bid_vol
+    lb_l = lb_delta > 0
+    lb_s = lb_delta < 0
+
+    sc_l = (b_l + s2) if d_l else 0
+    sc_s = (b_s + s2) if d_s else 0
+    lb_sc_l = (b_l + s2) if lb_l else 0
+    lb_sc_s = (b_s + s2) if lb_s else 0
+    # Flags returned so the caller can reproduce cpp:3955-3957 exactly:
+    #   finalScore = selLong ? (DL?scL:(LBL?lbScL:0)) : (DS?scS:(LBS?lbScS:0))
+    # `sc_l or lb_sc_l` would differ when DL holds but the body sums to zero.
+    return sc_l, sc_s, lb_sc_l, lb_sc_s, d_l, d_s, lb_l, lb_s
 
 
 def _m2_geom_ok(swept: bool) -> bool:
@@ -1205,7 +1487,10 @@ def is_news_window(hhmm: int) -> bool:
 def qual100(sel_mode: int, final_sc: int, edge_sc: int, fade_active: bool) -> int:
     if sel_mode == 7 and fade_active:
         return min(100, max(0, edge_sc * 10))
-    if sel_mode == 0 or 3 <= sel_mode <= 6:   # M1 + reversal modes use *10 (scores bounded 0-5 in Python)
+    # [score-port] cpp:445-446 — ONLY the reversal modes M4-M7 use *10. M1 was
+    # in this branch to compensate for the old score being capped at 5; with the
+    # real 12-component score it belongs on the /15 scale like M2/M3.
+    if 3 <= sel_mode <= 6:
         return min(100, max(0, final_sc * 10))
     return min(100, max(0, (final_sc * 100) // 15))
 
@@ -1431,6 +1716,12 @@ class Backtester:
         # [vp-lookahead-fix] per-bar snapshots; strategy loop reads self.vp_v[i],
         # never self.vp (which ends the pre-compute pass holding future levels).
         self.vp_v: List[_VPView] = []
+        # [score-port] intraday prior-session levels (S9), snapshotted per bar.
+        # Must be advanced on EVERY bar — the running session hi/lo becomes the
+        # next session's prev_high/prev_low, so feeding it only the bars that
+        # reach the strategy loop would corrupt it.
+        self.idl = IntradayLevels()
+        self.idl_v: List[_IDLView] = []
         self.risk  = Risk()
         self.inst_risk = InstRisk()  # [v12.32-ab] full RM model for the bug A/B
         self.trap  = Trap()
@@ -1537,8 +1828,17 @@ class Backtester:
             bar_abs_d = abs(bar.ask_vol - bar.bid_vol)
             _ad_ema = _ad_ema + _ad_alpha * (bar_abs_d - _ad_ema) if _ad_ema > 0 else float(bar_abs_d)
             self.vp.update(bar)
+            # [score-port] Fill zones with THIS bar before snapshotting, matching
+            # the cpp order (updateSinglePrints runs per bar against live data),
+            # then deep-copy the zone list so later fills can't mutate the past.
+            self.vp.update_single_prints(bar.high, bar.low, bar.volume)
             self.vp_v.append(_VPView(self.vp.poc, self.vp.vah, self.vp.val,
-                                     self.vp.valid))
+                                     self.vp.valid,
+                                     self.vp.poc50, self.vp.vah50,
+                                     self.vp.val50, self.vp.valid50,
+                                     tuple(tuple(z) for z in self.vp.sp_zones)))
+            self.idl.update(bar)
+            self.idl_v.append(self.idl.snapshot())
             self.atr_v.append(a)
             self.vwap_v.append(v)
             self.vwap_sd.append(s)
@@ -1712,11 +2012,17 @@ class Backtester:
         else:
             imb = imbalance_state(self.bars, i)
 
-        # Directional score (count confirming delta bars over last 5)
-        sc_l = sum(1 for j in range(max(0, i - 4), i + 1)
-                   if self.bars[j].ask_vol > self.bars[j].bid_vol)
-        sc_s = sum(1 for j in range(max(0, i - 4), i + 1)
-                   if self.bars[j].bid_vol > self.bars[j].ask_vol)
+        # [score-port] Directional score — faithful 12-component port of the cpp
+        # SCORING block. Was a count of confirming delta bars over the last 5,
+        # which capped the score at 5 and made M4 (quality = score*10) unable to
+        # clear QUAL_FLOOR=50. See directional_score() for the full rationale.
+        ice_bid_px, ice_ask_px = iceberg_state(self.bars, i, atr)
+        sc_l, sc_s, lb_sc_l, lb_sc_s, d_l, d_s, lb_l, lb_s = directional_score(
+            self.bars, i, atr, vwap, vsd,
+            self.vp_v[i] if i < len(self.vp_v) else None,
+            self.idl_v[i] if i < len(self.idl_v) else None, div, self.trap,
+            self.avg_d[i] if i < len(self.avg_d) else max(1.0, abs(dlt)),
+            dm, bull, bear, ice_bid_px, ice_ask_px)
 
         vb2u = vwap + vsd * 2 if vsd > 0 else 0.0
         vb2l = vwap - vsd * 2 if vsd > 0 else 0.0
@@ -2456,13 +2762,16 @@ class Backtester:
         # M6: use bk_vs (bkVerifyScore) directly — the mode-specific quality
         #     measure. bk_vs*10 maps 5→50, 6→60; C++ scL/scS achieves this
         #     via 12-component score which Python doesn't replicate.
-        if sel <= 2:
-            ctrl_signed = max(0, ctrl if sl else -ctrl)
-            final_sc = (sc_l if sl else sc_s) + ctrl_signed
-        elif sel == 5:
-            final_sc = bk_vs  # M6: use breakout verification score
+        # [score-port] cpp:3955-3957 — finalScore is the SAME expression for every
+        # mode: this bar's delta-gated score, falling back to the lean-back score.
+        # The two special cases removed here were both compensations for the old
+        # capped score: M1-M3 added ctrl on top (the cpp never does), and M6
+        # substituted bk_vs because "Python doesn't replicate" the 12-component
+        # score. It does now.
+        if sl:
+            final_sc = sc_l if d_l else (lb_sc_l if lb_l else 0)
         else:
-            final_sc = sc_l if sl else sc_s
+            final_sc = sc_s if d_s else (lb_sc_s if lb_s else 0)
         q = qual100(sel, final_sc, fade_edge, fade_active)
         if sel == 4 and TREND_LONG and self._tr_q:   # [trend-long] use custom quality
             q = self._tr_q
@@ -3299,7 +3608,6 @@ def main():
             w.writerow(["Date", "Time", "BarIdx", "Armed", "Sel", "SelSide"])
             w.writerows(bt.arm_rows)
         print(f"Arm CSV written to: {ARM_CSV}  ({len(bt.arm_rows):,} armed bars)")
-    return bt  # [v12.32-ab] expose Backtester for harness access to rm_gated / inst_risk
     return bt  # [v12.32-ab] expose Backtester for harness access to rm_gated / inst_risk
 
 
