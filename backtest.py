@@ -110,6 +110,43 @@ QUAL_FLOOR_M1 = None  # if set, overrides QUAL_FLOOR for M1 (sel==0) only — us
 QUAL_FLOOR_M2 = None  # if set, overrides QUAL_FLOOR for M2 (sel==1) only — used by backtest_m2_qual25_ab.py
 QUAL_FLOOR_M3 = None  # if set, overrides QUAL_FLOOR for M3 (sel==2) only
 QUAL_FLOOR_M4 = None  # if set, overrides QUAL_FLOOR for M4 (sel==3) only — used by backtest_m4floor60_ab.py
+# [armdiag] If set to a path, main() writes one row per bar on which ANY mode
+# armed, BEFORE the priority cascade: Date,Time,BarIdx,Armed,Sel,SelSide.
+# Identical schema to the cpp WriteArmed() (IOF_NQ_Armed_<sym>.csv) so live and
+# backtest arm rates are directly comparable. The live SETUP journal only ever
+# records the priority WINNER, which is why the two logs cannot currently be
+# reconciled (live ~89% M4 vs backtest ~3% M4 taken trades). Diagnostic only —
+# does not affect selection or any gate. Written by arm_audit.py.
+ARM_CSV = None
+QUAL_FLOOR_M5 = None  # if set, overrides QUAL_FLOOR for M5 (sel==4) only — used by backtest_m5m7_floor_ab.py
+QUAL_FLOOR_M6 = None  # if set, overrides QUAL_FLOOR for M6 (sel==5) only
+QUAL_FLOOR_M7 = None  # if set, overrides QUAL_FLOOR for M7 (sel==6) only — used by backtest_m5m7_floor_ab.py
+QUAL_FLOOR_M8 = None  # if set, overrides QUAL_FLOOR for M8 (sel==7) only
+C_MIN_SC_M1  = 3
+C_MIN_SC_ALL = 3
+C_COOL_TRADE = 5
+C_COOL_LOSS  = 10
+C_COOL_STOP  = 10
+C_OPEN_COOL  = 36
+C_SPIKE_ATR_M  = 3.0   # bar range spike: range >= 3x ATR
+C_VCOOL_THRESH = 7.0   # deep vol-cool: range/ATR >= 7 triggers extended pause
+C_VCOOL_PAUSE  = 40    # bars suppressed by deep vol cooldown
+C_SPIKE_COOL   = 20    # bars suppressed by range/delta spike state
+C_VWAP_MAT   = 40
+C_DELTA_MAT  = 25
+# [score-port] cpp C_DELTA_LB (Autopilot.cpp:470) — lean-back delta lookback.
+# Gates lbScL/lbScS, the fallback score used when this bar's own delta is flat.
+C_DELTA_LB   = 15
+C_CONSOL_LB  = 25
+C_CONSOL_ATR = 1.5
+C_SWEEP_LB   = 15
+C_MAX_LOSSES = 2
+C_STRUCT_LB  = 25
+C_M5_MIN_SC     = 3    # min score to arm M5
+C_M5_COOLDOWN   = 15   # bars between M5 arms
+C_M5_PHASE3_MAX = 20   # max bars in phase 3 before reset
+C_VWAP_SLP_LB   = 20   # [v12.22] VWAP slope lookback for M1 directional filter
+C_VWAP_SLP_TOL  = 0.02 # [v12.22] M1 VWAP slope tolerance as ATR fraction (tight)
 QUAL_FLOOR_M5 = None  # if set, overrides QUAL_FLOOR for M5 (sel==4) only — used by backtest_m5m7_floor_ab.py
 QUAL_FLOOR_M6 = None  # if set, overrides QUAL_FLOOR for M6 (sel==5) only
 QUAL_FLOOR_M7 = None  # if set, overrides QUAL_FLOOR for M7 (sel==6) only — used by backtest_m5m7_floor_ab.py
@@ -1471,6 +1508,7 @@ class Backtester:
         # [v12.35] NOFIRE diagnostic + arm-vs-fire funnel
         self.arm_long  = {m: 0 for m in range(8)}   # mode armed a LONG shape (pre-gates)
         self.arm_short = {m: 0 for m in range(8)}   # mode armed a SHORT shape (pre-gates)
+        self.arm_rows  = []                          # [armdiag] per-armed-bar detail rows
         self.nofire = []                            # sample [V18A NOFIRE] lines
         self.nofire_possible = {"M2": 0, "M4": 0, "M6": 0}
         self.nofire_why = {}                        # near-miss block-reason tally
@@ -2182,6 +2220,31 @@ class Backtester:
                               (6, m7l, m7s), (7, m8l, m8s)):
             if _ll: self.arm_long[_mi]  += 1
             if _ss: self.arm_short[_mi] += 1
+
+        # [armdiag] Per-armed-bar detail, mirroring cpp WriteArmed(). Mirrors the
+        # cascade at the bottom of this method (M6>M7>M8>M5>M4>M3>M2>M1) as a
+        # read-only pass so the cascade itself stays untouched. With ENABLE_M5/M7
+        # off — the live default — this reduces to the cpp ladder M6>M8>M4>M3>M2>M1.
+        if ARM_CSV:
+            _arms = (("M1L", m1l), ("M1S", m1s), ("M2L", m2l), ("M2S", m2s),
+                     ("M3L", m3l), ("M3S", m3s), ("M4L", m4l), ("M4S", m4s),
+                     ("M6L", m6l), ("M6S", m6s), ("M8L", m8l), ("M8S", m8s))
+            _on = [tag for tag, flag in _arms if flag]
+            if _on:
+                _sel, _side = "?", "?"
+                for _t, _f, _s in (("M6", m6l, "L"), ("M6", m6s, "S"),
+                                   ("M8", m8l, "L"), ("M8", m8s, "S"),
+                                   ("M4", m4l, "L"), ("M4", m4s, "S"),
+                                   ("M3", m3l, "L"), ("M3", m3s, "S"),
+                                   ("M2", m2l, "L"), ("M2", m2s, "S"),
+                                   ("M1", m1l, "L"), ("M1", m1s, "S")):
+                    if _f:
+                        _sel, _side = _t, _s
+                        break
+                self.arm_rows.append((
+                    bar.dt.strftime("%Y-%m-%d"), bar.dt.strftime("%H:%M:%S"),
+                    i, "|".join(_on), _sel, _side,
+                ))
 
         # ── [candidate-fire labeler hook] called whenever ANY mode arms, BEFORE
         # the priority cascade or any downstream gate (regime, RM, cool, qual).
@@ -3229,6 +3292,14 @@ def main():
     write_csv(trades, out)
     print_summary(trades)
     print(f"\nCSV written to: {out}")
+
+    if ARM_CSV:
+        with open(ARM_CSV, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["Date", "Time", "BarIdx", "Armed", "Sel", "SelSide"])
+            w.writerows(bt.arm_rows)
+        print(f"Arm CSV written to: {ARM_CSV}  ({len(bt.arm_rows):,} armed bars)")
+    return bt  # [v12.32-ab] expose Backtester for harness access to rm_gated / inst_risk
     return bt  # [v12.32-ab] expose Backtester for harness access to rm_gated / inst_risk
 
 

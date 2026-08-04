@@ -777,6 +777,36 @@ static void WriteLiveFire(SCStudyInterfaceRef& sc, const char* mode, const char*
     fclose(F);
 }
 
+// [armdiag] Pre-priority armed-mode log — file IOF_NQ_Armed_<sym>.csv.
+//
+// Purpose: the live SETUP journal records only the mode that WON the priority
+// ladder (M6 > M8 > M4 > M3 > M2 > M1), so it cannot answer how often a mode
+// armed and was outranked. Live SETUPs are ~89% M4 while the 6-contract
+// backtest baselines take ~3% M4 — the two logs disagree on mode mix by more
+// than sampling noise can explain, and neither log can localize the cause.
+// This writes one row per bar on which ANY mode armed, with the full armed
+// set plus what priority selected, so live and backtest arm rates become
+// directly comparable. backtest.py emits the identical schema.
+//
+// Diagnostic only: called after the no-arm early return, writes nothing to
+// study state, and cannot affect selection or order flow.
+static void WriteArmed(SCStudyInterfaceRef& sc, const char* armed, const char* sel,
+                       const char* selSide, int barIdx)
+{
+    InitRunID();
+    int Y,Mo,D,Hr,Mi,Se;
+    sc.BaseDateTimeIn[sc.Index].GetDateTimeYMDHMS(Y,Mo,D,Hr,Mi,Se);
+    EnsureDir(sc.DataFilesFolder().GetChars());
+    SCString Path; Path.Format("%s\\IOF_NQ_Armed_%s.csv",
+                               sc.DataFilesFolder().GetChars(), sc.Symbol.GetChars());
+    FILE* TF=fopen(Path.GetChars(),"r"); bool Hdr=(TF==NULL); if(TF) fclose(TF);
+    FILE* F=fopen(Path.GetChars(),"a"); if(!F) return;
+    if(Hdr) fprintf(F,"Date,Time,BarIdx,Armed,Sel,SelSide,Version,RunID\n");
+    fprintf(F,"%04d-%02d-%02d,%02d:%02d:%02d,%d,%s,%s,%s,v12.40,%llu\n",
+        Y,Mo,D,Hr,Mi,Se, barIdx, armed, sel, selSide, g_runID);
+    fclose(F);
+}
+
 static void LogError(SCStudyInterfaceRef& sc, const char* msg) {
     SCString m; m.Format("[V18A ERROR] %s", msg);
     sc.AddMessageToLog(m, 1);
@@ -1445,6 +1475,11 @@ enum PersistInt {
     PI_RetryLong       = 95,
     PI_RetryQty        = 96,
     PI_RetryScore      = 97,
+    // [armdiag] per-bar gate for the pre-priority armed-mode log. AutoLoop=1
+    // calls this study 50-200x per bar; without a per-bar gate the arm log
+    // would emit one row per call. Per-chart PersistInt, NOT a function-static
+    // — see the v12.29 cross-chart latch bug at the top of this file.
+    PI_LastArmBar      = 98,
 };
 
 enum PersistFloat {
@@ -1765,6 +1800,7 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
     int& RetryLong      = sc.GetPersistentInt(PI_RetryLong);
     int& RetryQty       = sc.GetPersistentInt(PI_RetryQty);
     int& RetryScore     = sc.GetPersistentInt(PI_RetryScore);
+    int& LastArmBar     = sc.GetPersistentInt(PI_LastArmBar);   // [armdiag]
 
     float& EntryPx     = sc.GetPersistentFloat(PF_EntryPx);
     float& StopPx      = sc.GetPersistentFloat(PF_StopPx);
@@ -2255,6 +2291,7 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
         LastSkipLogBar=-1; LastBlockLogBar=-1;
         LastVPBar=-1; LastCalcBar=-1;
         LastStopBar=-1; LastStopDir=0;
+        LastArmBar=-1;   // [armdiag] per-bar arm-log gate is per-session
         FlattenReason=FR_NONE;
         VP50Pending=1;
         PrevImbDir=0; PrevImbStr=0; PrevImbExtreme=0.f;
@@ -3763,6 +3800,42 @@ SCSFExport scsf_IOF_NQ_Autopilot(SCStudyInterfaceRef sc)
     bool goL=m1L||m2L||m3L||m4L||m6L||m8L;   // [v12.24] M5+M7 removed
     bool goS=m1S||m2S||m3S||m4S||m6S||m8S;
     if(!goL&&!goS) return;
+
+    // [armdiag] Record the FULL armed set before priority resolves it, once per
+    // bar. Everything below this point is diagnostic — no study state is
+    // written except the per-bar gate, and no early return is introduced.
+    // signalOnly (full recalc / historical download) is excluded so a study
+    // reload does not re-append every historical arm bar to the CSV — the same
+    // recalc-pollution trap the LiveFires journal avoids. Replay is allowed
+    // through, so a replay run can populate the file deliberately. Idx>LastArmBar
+    // (not !=) keeps writes monotonic if Sierra re-iterates recent bars.
+    if(DIAG && !signalOnly && Idx > LastArmBar){
+        LastArmBar = Idx;
+        char armed[96]; armed[0]='\0';
+        struct { bool on; const char* tag; } arms[] = {
+            {m1L,"M1L"},{m1S,"M1S"},{m2L,"M2L"},{m2S,"M2S"},{m3L,"M3L"},{m3S,"M3S"},
+            {m4L,"M4L"},{m4S,"M4S"},{m6L,"M6L"},{m6S,"M6S"},{m8L,"M8L"},{m8S,"M8S"},
+        };
+        for(int a=0; a<12; a++){
+            if(!arms[a].on) continue;
+            if(armed[0]) strncat(armed, "|", sizeof(armed)-strlen(armed)-1);
+            strncat(armed, arms[a].tag, sizeof(armed)-strlen(armed)-1);
+        }
+        // What priority WILL pick — mirrors the ladder below. Kept as a separate
+        // read-only pass so the ladder itself stays untouched.
+        const char* pSel="?"; const char* pSide="?";
+        if(m6L){pSel="M6";pSide="L";} else if(m6S){pSel="M6";pSide="S";}
+        else if(m8L){pSel="M8";pSide="L";} else if(m8S){pSel="M8";pSide="S";}
+        else if(m4L){pSel="M4";pSide="L";} else if(m4S){pSel="M4";pSide="S";}
+        else if(m3L){pSel="M3";pSide="L";} else if(m3S){pSel="M3";pSide="S";}
+        else if(m2L){pSel="M2";pSide="L";} else if(m2S){pSel="M2";pSide="S";}
+        else if(m1L){pSel="M1";pSide="L";} else if(m1S){pSel="M1";pSide="S";}
+        if(CSV_ON) WriteArmed(sc, armed, pSel, pSide, Idx);
+        if(LOG_LVL>=LOG_DBG){
+            SCString m; m.Format("[V18A ARMED] %s -> sel=%s%s", armed, pSel, pSide);
+            sc.AddMessageToLog(m,0);
+        }
+    }
 
     int selMode=-1;
     bool selLong=false;
