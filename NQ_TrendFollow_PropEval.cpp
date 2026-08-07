@@ -316,7 +316,11 @@ SCSFExport scsf_NQTrendFollowPropEval(SCStudyInterfaceRef sc)
         In_ADXLen.SetIntLimits(2, 100);
 
         In_ADXMin.Name = "Minimum ADX to Trade";
-        In_ADXMin.SetFloat(20.0f);
+        // 30, not 20. The single highest-value input on the whole study: it is
+        // the only axis out of a 6,912-config sweep that moved the result at
+        // all, and the response is a monotone plateau (OOS net rises 15->25->30
+        // then holds through 40), not a spike. Cuts trade count ~65%.
+        In_ADXMin.SetFloat(30.0f);
         In_ADXMin.SetFloatLimits(0.0f, 100.0f);
 
         In_ATRLen.Name = "ATR Length";
@@ -349,7 +353,10 @@ SCSFExport scsf_NQTrendFollowPropEval(SCStudyInterfaceRef sc)
         In_MaxStopPts.SetFloatLimits(0.25f, 1000.0f);
 
         In_TargetR.Name = "Take Profit (R multiple of stop)";
-        In_TargetR.SetFloat(2.5f);   // 2.5R x ~$150 risk = ~$375; 3 winners clears $1000
+        // 3.0R at the budget risk unit ($275) is ~$825 gross -- one winner
+        // clears the $700 day. The 1.5R..4.0R response is flat-to-rising with
+        // no knife edge, so this is a plateau pick, not a fitted one.
+        In_TargetR.SetFloat(3.0f);
         In_TargetR.SetFloatLimits(0.25f, 20.0f);
 
         In_UseTrailStop.Name = "Use Trailing Stop Instead Of Fixed (0=No, 1=Yes)";
@@ -373,11 +380,17 @@ SCSFExport scsf_NQTrendFollowPropEval(SCStudyInterfaceRef sc)
         In_RiskPerTrade.SetFloatLimits(1.0f, 100000.0f);
 
         In_MaxContracts.Name = "Max Contracts Per Trade";
-        In_MaxContracts.SetInt(6);          // sized for MNQ; use 1 for full-size NQ
+        // 20 so the cap does not bind on tight stops under budget sizing (peak
+        // observed size is 11 MNQ ~= 1.1 NQ). At 6 it silently clipped the
+        // small-stop trades and under-risked them. Use 1-2 for full-size NQ.
+        In_MaxContracts.SetInt(20);
         In_MaxContracts.SetIntLimits(1, 50);
 
         In_DailyTarget.Name = "Daily Profit Target ($, 0 = off)";
-        In_DailyTarget.SetFloat(1000.0f);
+        // 700, not 1000. At 1000 the target was never once reached in 313
+        // backtested days -- unreachable targets are not conservative, they
+        // just never bind. 700 is hit on ~24% of trading days.
+        In_DailyTarget.SetFloat(700.0f);
         In_DailyTarget.SetFloatLimits(0.0f, 1000000.0f);
 
         In_DailyLossLimit.Name = "Daily Loss Limit ($, positive number)";
@@ -389,7 +402,10 @@ SCSFExport scsf_NQTrendFollowPropEval(SCStudyInterfaceRef sc)
         In_GivebackStop.SetFloatLimits(0.0f, 1000000.0f);
 
         In_MaxTradesDay.Name = "Max Trades Per Day (0 = off)";
-        In_MaxTradesDay.SetInt(5);
+        // 3, not 5. With MCL=2 this drops the worst-case loss path from 3 to 2
+        // (see NQTF_WorstCaseLosses), which lets budget sizing put $275 behind
+        // each trade instead of $183. Fewer, bigger bullets.
+        In_MaxTradesDay.SetInt(3);
         In_MaxTradesDay.SetIntLimits(0, 100);
 
         In_MaxConsecLoss.Name = "Max Consecutive Losses (0 = off)";
@@ -445,7 +461,7 @@ SCSFExport scsf_NQTrendFollowPropEval(SCStudyInterfaceRef sc)
         // 0 reproduces the original sizing exactly. Defaults keep it at 0 so
         // this patch is a no-op until it is deliberately switched on.
         In_RiskMode.Name = "Sizing Model (0=Fixed Risk Per Trade, 1=Budget)";
-        In_RiskMode.SetInt(0);
+        In_RiskMode.SetInt(1);
         In_RiskMode.SetIntLimits(0, 1);
 
         // Budget mode only. Ceilings a single trade at this multiple of 1R so
@@ -461,7 +477,12 @@ SCSFExport scsf_NQTrendFollowPropEval(SCStudyInterfaceRef sc)
         // silently tightening. Backtested response is monotone and plateaus
         // around 2.5R; below ~2R the governor destroys more than it protects.
         In_GivebackR.Name = "Giveback As R Multiple (0 = use $ value above)";
-        In_GivebackR.SetFloat(0.0f);
+        // 2.5R (= $688 at the default risk unit). The flat $400 above is 4.4R
+        // against 1-lot sizing but only 1.45R against 3-lot, so it silently
+        // tightened 3x and started cutting winners -- 24 of 171 exits. Response
+        // is monotone and plateaus here; below ~2R the rail destroys more than
+        // it protects (1.0R = -$2,973 pooled vs +$5,354 at 2.5R).
+        In_GivebackR.SetFloat(2.5f);
         In_GivebackR.SetFloatLimits(0.0f, 20.0f);
 
         return;
