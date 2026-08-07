@@ -46,8 +46,44 @@ enum PersistIntKeys
     PI_DG_BLK_POS       = 30,  // a position is already open
     PI_DG_BLK_WORK      = 31,  // working orders exist but no position
     PI_DG_BLK_SESSION   = 32,  // outside the entry window
-    PI_DG_BLK_SIZE      = 33   // signal fired but could not be sized
+    PI_DG_BLK_SIZE      = 33,  // signal fired but could not be sized
+
+    // Order submission outcome. Without these, a study that computes signals
+    // but never trades looks identical to one whose signals are wrong: the
+    // funnel ends "signals N, unsized 0, ORDERS 0" and says nothing about why.
+    PI_DG_REJECTS       = 34,  // BuyEntry/SellEntry returned <= 0
+    PI_DG_LAST_RC       = 35,  // the last such return code
+    PI_RC_LOG_SENT      = 36   // one decoded rejection message per day
 };
+
+// Decode the ACSIL order return code. The -899x family are SCT_SKIPPED_* --
+// Sierra declined to submit and nothing reached the trade service; only -1..-9
+// are real submission errors. Mixing the two up wastes a day chasing a broker
+// problem that never happened.
+static const char* NQTF_OrderRCText(int rc)
+{
+    switch (rc)
+    {
+        case  -1:    return "SCTRADING_ORDER_ERROR (real submission failure)";
+        case  -2:    return "NOT_OCO_ORDER_TYPE";
+        case  -3:    return "ATTACHED_ORDER_OFFSET_NOT_SUPPORTED_WITH_MARKET_PARENT";
+        case  -4:    return "UNSUPPORTED_ATTACHED_ORDER";
+        case  -5:    return "SYMBOL_SETTINGS_NOT_FOUND";
+        case  -6:    return "GENERAL_NULL_POINTER_ERROR";
+        case  -8:    return "UNSUPPORTED_ORDER_TYPE";
+        case  -9:    return "ERROR_SETTING_ORDER_PRICES";
+        case -8999:  return "SKIPPED_DOWNLOADING_HISTORICAL_DATA (not sent)";
+        case -8998:  return "SKIPPED_FULL_RECALC -- studies cannot trade on "
+                            "historical bars. Use Replay, not a chart reload.";
+        case -8997:  return "SKIPPED_ONLY_ONE_TRADE_PER_BAR (not sent)";
+        case -8996:  return "SKIPPED_INVALID_INDEX_SPECIFIED (not sent)";
+        case -8995:  return "SKIPPED_TOO_MANY_NEW_BARS_DURING_UPDATE (not sent)";
+        case -8994:  return "SKIPPED_AUTO_TRADING_DISABLED -- enable Auto "
+                            "Trading and/or Trade Simulation for this chart.";
+        case 0:      return "no order returned";
+        default:     return "unrecognised return code";
+    }
+}
 
 enum PersistDoubleKeys
 {
@@ -496,7 +532,8 @@ SCSFExport scsf_NQTrendFollowPropEval(SCStudyInterfaceRef sc)
             Msg.Format("DIAG day %d | BLOCKED: halted %d (reason %d), in-position %d, "
                        "working-orders %d, out-of-window %d || EVALUATED %d -> rejected: "
                        "ATR %d, ADX %d, range %d, trend %d, pullback %d, trigger %d "
-                       "|| signals %d, unsized %d, ORDERS %d",
+                       "|| signals %d, unsized %d, ORDERS %d, "
+                       "not-submitted %d (last rc=%d %s)",
                        r_TradingDay,
                        sc.GetPersistentInt(PI_DG_BLK_HALT),
                        r_HaltReason,
@@ -512,7 +549,10 @@ SCSFExport scsf_NQTrendFollowPropEval(SCStudyInterfaceRef sc)
                        sc.GetPersistentInt(PI_DG_TRIGGER),
                        sc.GetPersistentInt(PI_DG_SIGNALS),
                        sc.GetPersistentInt(PI_DG_BLK_SIZE),
-                       sc.GetPersistentInt(PI_DG_ORDERS));
+                       sc.GetPersistentInt(PI_DG_ORDERS),
+                       sc.GetPersistentInt(PI_DG_REJECTS),
+                       sc.GetPersistentInt(PI_DG_LAST_RC),
+                       NQTF_OrderRCText(sc.GetPersistentInt(PI_DG_LAST_RC)));
             sc.AddMessageToLog(Msg, 0);
         }
 
@@ -545,6 +585,9 @@ SCSFExport scsf_NQTrendFollowPropEval(SCStudyInterfaceRef sc)
         sc.GetPersistentInt(PI_DG_BLK_POS)     = 0;
         sc.GetPersistentInt(PI_DG_BLK_WORK)    = 0;
         sc.GetPersistentInt(PI_DG_BLK_SESSION) = 0;
+        sc.GetPersistentInt(PI_DG_REJECTS)     = 0;
+        sc.GetPersistentInt(PI_DG_LAST_RC)     = 0;
+        sc.GetPersistentInt(PI_RC_LOG_SENT)    = 0;
         sc.GetPersistentInt(PI_DG_BLK_SIZE)    = 0;
     }
 
@@ -951,10 +994,22 @@ SCSFExport scsf_NQTrendFollowPropEval(SCStudyInterfaceRef sc)
                    ADXVal, ATRVal, r_TradesToday, DailyPL);
         sc.AddMessageToLog(Msg, 0);
     }
-    else if (Result < 0 && In_ShowDebug.GetInt())
+    else
     {
-        SCString Msg;
-        Msg.Format("Order not accepted. Return code %d (see Trade Service Log).", Result);
-        sc.AddMessageToLog(Msg, 1);
+        // Count and remember every non-fill so the daily DIAG line can report
+        // it. This branch used to be gated behind In_ShowDebug, which defaults
+        // to 0 -- so a study that submitted nothing all year looked silent.
+        sc.GetPersistentInt(PI_DG_REJECTS) += 1;
+        sc.GetPersistentInt(PI_DG_LAST_RC)  = Result;
+
+        int& r_RCLogSent = sc.GetPersistentInt(PI_RC_LOG_SENT);
+        if (r_RCLogSent == 0 || In_ShowDebug.GetInt())
+        {
+            r_RCLogSent = 1;
+            SCString Msg;
+            Msg.Format("ORDER NOT SUBMITTED. rc=%d  %s",
+                       Result, NQTF_OrderRCText(Result));
+            sc.AddMessageToLog(Msg, 1);
+        }
     }
 }
