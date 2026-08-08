@@ -107,3 +107,8 @@ IOF_tfpe_*.csv
 *_run.log
 *_ab.log
 *_ab.err
+
+# sweep-absorption harness: volume-bar caches and per-run trade logs
+.sweepabs_bars_*.npz
+IOF_swabs_*.csv
+swabs_*.log
