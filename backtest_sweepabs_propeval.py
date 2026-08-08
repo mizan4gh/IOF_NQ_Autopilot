@@ -25,8 +25,8 @@ WHAT THE CPP IS
                        dies instead if price extends 0.060*scale past the
                        extreme
     ABSORBED -> FIRE   aggression weakening (|delta| < 0.5*|sweep delta| or
-                       sign flip) AND reclaim (close > level or > sweep bar
-                       high). Dies on a new extreme.         (expires 10 min)
+                       sign flip) AND a close back through the level. Dies on
+                       a new extreme.                        (expires 10 min)
 
   Shorts are the exact mirror.
 
@@ -49,7 +49,8 @@ WHAT THE CPP IS
 
   rev="v1" (or SA_REV=v1) reproduces the original revision of the file: bar
   ATR as the ruler, expiries in bars, raw bar volume instead of intensity, no
-  stop clamps, no entry-distance cap, giveback measured against open P/L.
+  stop clamps, no entry-distance cap, giveback measured against open P/L, and
+  the sweep-bar reclaim clause still present.
 
 WHY THIS HARNESS EXISTS AND WHAT IT IS SUSPICIOUS OF
   The repo has already falsified a sweep/absorption reversal once
@@ -173,11 +174,12 @@ class Params:
     cluster_mult: float = 2.0           # v1 only: x tolerance
     cluster_points: float = 10.0        # v2: absolute points
     max_entry_dist: float = 0.025       # v2: x scale, 0 = off
-    # Which reclaim confirms the fade. The cpp accepts EITHER a close back
-    # through the swept level OR a close beyond the sweep bar's own extreme.
-    # The second is a different event: it fires while the level is still
-    # broken, i.e. before the fade has actually been confirmed.
-    reclaim_mode: str = "level_or_bar"  # "level_or_bar" | "level_only"
+    # Which reclaim confirms the fade. The cpp now requires a close back
+    # through the swept level. It used to also accept a close beyond the sweep
+    # bar's own extreme -- a different event, fired while the level is still
+    # broken. Measured: level +0.256R (n=83, 5/6 contracts), sweep-bar-only
+    # -0.686R (n=17, t=-5.43, 0/6). "level_or_bar" reproduces the old cpp.
+    reclaim_mode: str = "level_only"    # "level_only" | "level_or_bar"
     # -- order flow --
     delta_lookback: int = 100
     delta_sigma: float = 1.2
@@ -232,6 +234,7 @@ class Params:
 # The original file, so the two revisions can be run against identical bars.
 V1 = Params(
     rev="v1", scale_mode="atr", tol_atr_mult=0.20, cluster_mult=2.0,
+    reclaim_mode="level_or_bar",
     max_entry_dist=0.0, delta_sigma=1.5, abs_ratio_mult=1.8, intensity=0,
     volume_mult=1.5, close_pos_in_bar=0.40, expiry_mode="bars",
     armed_expiry=10, swept_expiry=5, absorb_expiry=5, invalid_atr_mult=0.5,

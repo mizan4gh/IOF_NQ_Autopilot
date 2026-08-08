@@ -1051,10 +1051,23 @@ SCSFExport scsf_MNQ_SweepAbsorption_PropEval(SCStudyInterfaceRef sc)
                 (std::fabs(Delta) < 0.5f * std::fabs(Lv.SweepDelta)) ||
                 (Dir > 0 ? Delta > 0.0f : Delta < 0.0f);
 
-            // Reclaim of the swept level, or a break of the sweep bar's extreme.
+            // Reclaim of the swept level. Nothing else counts.
+            //
+            // This used to also accept a close beyond the sweep BAR's own
+            // extreme. That is a different event: it fires while the level is
+            // still broken, i.e. before the fade has been confirmed, and it is
+            // where the far-from-level entries came from. Measured over the
+            // trigger population with the governors off, the two clauses go in
+            // opposite directions -- level reclaim +0.256R over n=83 and
+            // positive on 5 of 6 contracts, sweep-bar-only -0.686R over n=17,
+            // t=-5.43, positive on NONE of the 6. Do not put it back.
+            //
+            // SweepBarHigh/SweepBarLow are still maintained; they are read by
+            // nothing now but remain useful when reading the state in a debug
+            // session.
             const bool Reclaimed = (Dir > 0)
-                ? (Close > P || Close > Lv.SweepBarHigh)
-                : (Close < P || Close < Lv.SweepBarLow);
+                ? (Close > P)
+                : (Close < P);
 
             if (Weakening && Reclaimed)
             {
