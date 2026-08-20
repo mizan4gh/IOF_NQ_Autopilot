@@ -41,17 +41,19 @@ def pooled(mod, prepared, side_mode):
 
 def main():
     argv = sys.argv[1:]
-    draws, scope, p3 = 200, "--nq", False
+    draws, scope, which = 200, "--nq", "rolling"
     for a in argv:
-        if a == "--p3":
-            p3 = True
+        if a in ("--p3", "--avpmd"):
+            which = a[2:]
         elif a.startswith("--"):
             scope = a
         else:
             draws = int(a)
 
-    if p3:
+    if which == "p3":
         import backtest_mizan_p3 as MZ
+    elif which == "avpmd":
+        import backtest_mizan_avpmd as MZ
     else:
         import backtest_mizan_iof_nq as MZ
 
@@ -68,7 +70,7 @@ def main():
         prepared.append((bars, MZ.scan(bars, q), q))
         tags.append(tag)
 
-    print(f"{'Mizan_IOF_NQ_P3' if p3 else 'Mizan_IOF_NQ'} re-sign null -- "
+    print(f"{MZ.__name__} re-sign null -- "
           f"{draws} draws over {len(prepared)} contracts ({', '.join(tags)})")
     print("  entry bar / entry price / stop distance / target held fixed; "
           "SIDE re-signed\n")
