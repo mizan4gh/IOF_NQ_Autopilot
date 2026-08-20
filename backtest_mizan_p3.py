@@ -137,6 +137,38 @@ BASE = Path(__file__).parent
 IS_TAGS = ("NQU25", "NQZ25", "NQM5")
 OOS_TAGS = ("NQH6", "NQM6", "NQU26")
 
+# ── uncorrelated instruments ────────────────────────────────────────────────
+# The standing blocker on this strategy is that all six NQ contracts are one
+# index, and ES (0.954 daily correlation) is a portability check rather than
+# independent evidence. Crude and gold are the first genuinely uncorrelated
+# tests available. Both live in the Sierra data directory, not the repo, and
+# .scid is gitignored -- FROZEN copies are made by --freeze so a live Sierra
+# cannot rewrite them mid-run.
+SC_DATA = Path("C:/SierraChart/Data")
+CL_FROZEN = {"CLG3": BASE / "FROZEN_CLG3.NYMEX.scid"}      # 2022-01 -> 2023-01
+GC_FROZEN = {                                              # miNY gold
+    "QOQ5": BASE / "FROZEN_QOQ5.COMEX.scid",               # 2025-02 -> 2025-07
+    "QOG6": BASE / "FROZEN_QOG6.COMEX.scid",               # 2025-08 -> 2026-01
+}
+_FREEZE_SRC = {"CLG3": "CLG3.NYMEX.scid", "QOQ5": "QOQ5.COMEX.scid",
+               "QOG6": "QOG6.COMEX.scid"}
+
+# Per-instrument contract specs. pt_val scales every dollar figure linearly and
+# therefore cannot move a null percentile or a net>0 count -- only the
+# commission, expressed in POINTS, changes the ranking. tick matters much more:
+# rounding a CL stop (0.01) to the NQ tick would quantise risk into $250 steps.
+SPECS = {
+    "NQ": dict(tick=0.25, pt_val=20.0,   commission=5.00, bin_pts=1.0),
+    "MNQ": dict(tick=0.25, pt_val=2.0,   commission=1.50, bin_pts=1.0),
+    "ES": dict(tick=0.25, pt_val=50.0,   commission=5.00, bin_pts=1.0),
+    "CL": dict(tick=0.01, pt_val=1000.0, commission=5.00, bin_pts=0.05),
+    "GC": dict(tick=0.10, pt_val=50.0,   commission=5.00, bin_pts=1.0),
+}
+
+
+def _rt(v, tick: float):
+    return np.round(np.asarray(v) / tick) * tick
+
 
 @dataclass(frozen=True)
 class Params:
@@ -195,6 +227,8 @@ class Params:
     min_level_tgt_r: float = 1.0  # a level nearer than this is not a target
     max_hold_bars: int = 0        # 0 = hold to the 15:55 flatten
     atr_len: int = 14
+    # ── contract spec ──────────────────────────────────────────────────────
+    tick: float = 0.25
     # ── sizing / governors (simulate() reads these by name) ────────────────
     qty: int = 1
     pt_val: float = 20.0
@@ -246,7 +280,8 @@ class Sessions:
     sid: np.ndarray         # session ordinal, for adjacency checks
 
 
-def sessions(a) -> Sessions:
+def sessions(a, on_start: int = 1800, rth_open: int = 930,
+             rth_close: int = 1600) -> Sessions:
     """Group bars into 18:00 -> 17:59 trading days.
 
     The evening block carries the previous ET calendar date, so it is pushed one
@@ -255,7 +290,7 @@ def sessions(a) -> Sessions:
     free instead of needing a calendar.
     """
     uniq, inv = np.unique(a.dtag, return_inverse=True)
-    sid = inv + (a.hhmm >= 1800).astype(np.int64)
+    sid = inv + (a.hhmm >= on_start).astype(np.int64)
     keep = sid < len(uniq)                 # last evening has no morning
     if not keep.all():
         sid = sid.copy()
@@ -277,25 +312,33 @@ def sessions(a) -> Sessions:
         lo, hi = int(g0[k]), int(g1[k])
         hh = a.hhmm[lo:hi]
         # overnight = the contiguous prefix of 18:00-23:59 then 00:00-09:29
-        is_on = (hh >= 1800) | (hh < 930)
+        is_on = (hh >= on_start) | (hh < rth_open)
         nf = np.flatnonzero(~is_on)
         on_end[k] = lo + (int(nf[0]) if len(nf) else hi - lo)
-        rth = np.flatnonzero((hh >= 930) & (hh < 1600))
+        rth = np.flatnonzero((hh >= rth_open) & (hh < rth_close))
         rth_end[k] = lo + int(rth[-1]) + 1 if len(rth) else on_end[k]
     return Sessions(starts=g0, ends=g1, on_end=on_end, rth_end=rth_end,
                     sid=sid[g0])
 
 
 _SCAN_CACHE: Dict[Tuple[int, tuple], Tuple[List[Bar], Cands]] = {}
-_SESS_CACHE: Dict[int, Tuple[List[Bar], Sessions]] = {}
+_SESS_CACHE: Dict[tuple, Tuple[List[Bar], Sessions]] = {}
 
 
-def sessions_cached(bars: List[Bar]) -> Sessions:
-    hit = _SESS_CACHE.get(id(bars))
+def sessions_cached(bars: List[Bar], p: Optional[Params] = None) -> Sessions:
+    """Session split, cached on the BOUNDARIES as well as the bars.
+
+    These used to be hardcoded to 1800/0930/1600, which silently made rth_open
+    a dead input -- a test of "use each instrument's own pit open" came back
+    byte-identical to the 09:30 run, which is the only reason it was caught.
+    """
+    p = p or Params()
+    key = (id(bars), p.on_start, p.rth_open, p.rth_close)
+    hit = _SESS_CACHE.get(key)
     if hit is not None and hit[0] is bars:
         return hit[1]
-    s = sessions(arrays(bars))
-    _SESS_CACHE[id(bars)] = (bars, s)
+    s = sessions(arrays(bars), p.on_start, p.rth_open, p.rth_close)
+    _SESS_CACHE[key] = (bars, s)
     return s
 
 
@@ -315,7 +358,7 @@ def scan(bars: List[Bar], p: Params) -> Cands:
 
     a = arrays(bars)
     n = len(bars)
-    S = sessions_cached(bars)
+    S = sessions_cached(bars, p)
     atr = atr_wilders(a, p.atr_len)
     rng = a.h - a.l
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -396,8 +439,8 @@ def scan(bars: List[Bar], p: Params) -> Cands:
             if j < rth_end and a.hhmm[j] <= p.session_end:
                 e, fill = j, float(a.o[j])
         else:
-            lv = float(round_to_tick(poc + side * p.poc_tol_atr * A))
-            thru = p.require_through * TICK
+            lv = float(_rt(poc + side * p.poc_tol_atr * A, p.tick))
+            thru = p.require_through * p.tick
             for j in range(d + 1, min(d + 1 + p.pb_bars, rth_end)):
                 if a.hhmm[j] > p.session_end:
                     break
@@ -411,8 +454,8 @@ def scan(bars: List[Bar], p: Params) -> Cands:
             continue
 
         raw = abs(fill - invalid) + p.stop_buf_atr * A
-        sp = float(round_to_tick(np.clip(raw, p.min_stop_atr * A,
-                                         p.max_stop_atr * A)))
+        sp = float(_rt(np.clip(raw, p.min_stop_atr * A,
+                               p.max_stop_atr * A), p.tick))
         if sp <= 0.0:
             continue
 
@@ -423,7 +466,7 @@ def scan(bars: List[Bar], p: Params) -> Cands:
                    if (L - fill) * side >= p.min_level_tgt_r * sp]
             if far:
                 tgt = abs((min(far) if side > 0 else max(far)) - fill)
-        out.append((e, side, float(fill), sp, float(round_to_tick(tgt)), A, poc,
+        out.append((e, side, float(fill), sp, float(_rt(tgt, p.tick)), A, poc,
                     onh - onl, m, e - m,
                     e if p.entry_mode in ("confirm", "sweep") else e + 1))
 
@@ -455,15 +498,63 @@ def run_engine(bars: List[Bar], p: Optional[Params] = None,
                     side_mode if side_mode is not None else SIDE_MODE)
 
 
+def instrument_of(tag: str) -> str:
+    if tag in CL_FROZEN:  return "CL"
+    if tag in GC_FROZEN:  return "GC"
+    if tag in ES_FROZEN:  return "ES"
+    if tag in MNQ:        return "MNQ"
+    return "NQ"
+
+
+def apply_spec(p: Params, tag: str) -> Params:
+    """Tick / point value / commission for the instrument the tag belongs to.
+
+    Applied per contract rather than per run so a mixed pool cannot silently
+    price crude with the NQ tick. Env overrides still win: params_from_env is
+    re-applied on top, so MZ3_COMMISSION=0 is honoured everywhere.
+    """
+    return params_from_env(replace(p, **SPECS[instrument_of(tag)]))
+
+
+def freeze(tags=None) -> None:
+    """Copy the Sierra live-directory files into the repo as FROZEN_ copies.
+
+    Sierra rewrites files in its data directory while it runs, which has
+    silently invalidated a run in this repo before. Everything downstream reads
+    only the frozen copy. .scid is gitignored, so nothing large is committed.
+    """
+    import shutil
+    for tag, src in _FREEZE_SRC.items():
+        if tags and tag not in tags:
+            continue
+        dst = {**CL_FROZEN, **GC_FROZEN}[tag]
+        s = SC_DATA / src
+        if not s.exists():
+            print(f"  {tag:6s} MISSING {s}")
+            continue
+        if dst.exists() and dst.stat().st_size == s.stat().st_size:
+            print(f"  {tag:6s} already frozen ({dst.stat().st_size:,} bytes)")
+            continue
+        shutil.copy2(s, dst)
+        print(f"  {tag:6s} froze {s.name} -> {dst.name} "
+              f"({dst.stat().st_size:,} bytes)")
+
+
 def contracts_for(scope: str) -> Dict[str, Path]:
     env = os.environ.get("MZ3_TAGS")
-    everything = {**NQ_FROZEN, **MNQ, **ES_FROZEN}
+    everything = {**NQ_FROZEN, **MNQ, **ES_FROZEN, **CL_FROZEN, **GC_FROZEN}
     if env:
         return {t: everything[t] for t in env.split(",") if t in everything}
     if scope == "--mnq":
         return dict(MNQ)
     if scope == "--es":
         return dict(ES_FROZEN)
+    if scope == "--cl":
+        return dict(CL_FROZEN)
+    if scope == "--gc":
+        return dict(GC_FROZEN)
+    if scope == "--uncorr":
+        return {**CL_FROZEN, **GC_FROZEN}
     if scope == "--is":
         return {t: everything[t] for t in IS_TAGS}
     if scope == "--oos":
@@ -474,15 +565,16 @@ def contracts_for(scope: str) -> Dict[str, Path]:
 
 
 def run_one(tag: str, scid: Path, p: Params, write: bool = True) -> dict:
+    p = apply_spec(p, tag)
     bars = load_bars_cached(tag, scid, BAR_MINUTES)
     c = scan(bars, p)
     r = simulate(bars, c, p)
     if write:
         suffix = f"_{RUN_TAG}" if RUN_TAG else ""
         write_csv(r, BASE / f"IOF_mizanP3{suffix}_{tag}.csv")
-    s = summarize(r)
+    s = summarize(r, p)
     s["cands"] = len(c.idx)
-    s["sessions"] = max(len(sessions_cached(bars).starts) - 1, 0)
+    s["sessions"] = max(len(sessions_cached(bars, p).starts) - 1, 0)
     print(f"  {tag:7s} sess={s['sessions']:>4} cand={s['cands']:>4} "
           f"n={s['n']:>4} L/S={s['longs']}/{s['n']-s['longs']:<4} "
           f"WR={s['wr']:>5.1f}% PF={s['pf']:>5.2f} Net=${s['total']:>+9,.0f} "
@@ -494,6 +586,10 @@ def run_one(tag: str, scid: Path, p: Params, write: bool = True) -> dict:
 
 def main():
     args = sys.argv[1:]
+    if "--freeze" in args:
+        print("Freezing Sierra data-directory copies into the repo:")
+        freeze()
+        return
     scope = next((a for a in args if a.startswith("--")), "--nq")
     p = params_from_env()
 

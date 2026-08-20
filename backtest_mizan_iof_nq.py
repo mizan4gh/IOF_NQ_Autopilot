@@ -516,7 +516,9 @@ def simulate(bars: List[Bar], cands: Cands, p: Params,
     res = Result()
     a = arrays(bars)
     n = len(bars)
-    slip = p.slip_ticks * TICK
+    # p.tick, not the module TICK: 0.25 is the NQ/ES tick and quantising a CL
+    # stop (0.01) or a gold stop to it would round risk into $250 steps.
+    slip = p.slip_ticks * getattr(p, "tick", TICK)
     day = -1
     ds: Optional[DayStat] = None
     closed_pl = 0.0
@@ -642,7 +644,10 @@ def run_engine(bars: List[Bar], p: Optional[Params] = None,
 
 
 # ── reporting ───────────────────────────────────────────────────────────────
-def summarize(r: Result) -> dict:
+def summarize(r: Result, p: Optional[Params] = None) -> dict:
+    """p is only needed for the avg_r column: R = pnl / (stop_pts * $/point),
+    and hardcoding NQ's $20 made that column meaningless on crude and gold."""
+    pv = p.pt_val if p is not None else 20.0
     pnls = np.array([t.pnl for t in r.trades])
     n = len(pnls)
     days = [d for d in r.days if d.n > 0]
@@ -659,7 +664,7 @@ def summarize(r: Result) -> dict:
     reasons: Dict[str, int] = {}
     for t in r.trades:
         reasons[t.reason] = reasons.get(t.reason, 0) + 1
-    rs = [t.pnl / (t.stop_pts * 20.0) for t in r.trades if t.stop_pts > 0]
+    rs = [t.pnl / (t.stop_pts * pv) for t in r.trades if t.stop_pts > 0]
     return dict(
         n=n, total=float(pnls.sum()),
         pf=(float(wins.sum() / -loss.sum()) if len(loss) else float("inf")),

@@ -61,8 +61,11 @@ def main():
     for tag, scid in which.items():
         if not scid.exists():
             continue
+        # per-contract tick / point value, so a mixed or non-index pool is not
+        # priced with the NQ spec
+        q = MZ.apply_spec(p, tag) if hasattr(MZ, "apply_spec") else p
         bars = load_bars_cached(tag, scid, MZ.BAR_MINUTES)
-        prepared.append((bars, MZ.scan(bars, p), p))
+        prepared.append((bars, MZ.scan(bars, q), q))
         tags.append(tag)
 
     print(f"{'Mizan_IOF_NQ_P3' if p3 else 'Mizan_IOF_NQ'} re-sign null -- "
