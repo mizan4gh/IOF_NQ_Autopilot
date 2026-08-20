@@ -1,7 +1,11 @@
 """
 Mizan_IOF_NQ_P3 -- the DAILY power-of-three: overnight accumulation, opening
-manipulation of a FROZEN level, RTH distribution, entered on the pullback to the
-frozen overnight POC.
+manipulation of a FROZEN level, entered immediately on the reclaim.
+
+The name still says power-of-three, but the measured strategy is A->M. The
+distribution stage and the pullback-to-POC entry that motivated the file both
+turned out to destroy value, and both are retained only as named entry_modes so
+the comparison stays runnable. See RESULTS.
 
 WHY THIS EXISTS
   The rolling intraday version (backtest_mizan_iof_nq.py) is falsified: 14
@@ -42,11 +46,16 @@ THE RULES (long case; short is the exact mirror)
      by more than sweep_eps_atr x ATR and closes back above it, closing in the
      upper sweep_close_pos of its own range. First such bar in the day wins, and
      it is the only setup the day gets. low[j] is the invalidation.
-  D. Within dist_bars, a close lands dist_min_atr x ATR clear of ON_POC on the
-     upside. Aborted if a close first goes back under low[j] -- that is the
-     sweep succeeding, which is a different day.
-  E. A resting limit at ON_POC + poc_tol_atr x ATR, armed pb_bars bars, filled
-     only if a bar trades THROUGH it by require_through ticks, at min(open, lvl).
+  E. Market at the open of bar j+1, which is what an order sent after bar j
+     closes actually gets. The trade is managed against bar j+1's OWN range --
+     see Cands.manage_at; starting it a bar later deletes the first bar of
+     adverse excursion from every trade and is worth $6.4k of fiction here.
+
+  The two stages this file was built to test sit behind entry_mode and are OFF:
+  D (a close dist_min_atr x ATR clear of ON_POC within dist_bars) under
+  "confirm", and the resting limit at ON_POC + poc_tol_atr x ATR under "poc".
+  ON_POC is still computed every day -- it costs nothing, it lands in the CSV,
+  and it is what those two modes need.
 
   ATR is frozen too: the value on the last bar before 09:30. Every threshold is
   an ATR multiple, never a point count -- the index went 20k to 30k across these
@@ -63,19 +72,14 @@ THE RULES (long case; short is the exact mirror)
   No time stop by default: the daily thesis is that the distribution leg runs
   into the close, so the trade is held to 15:55 unless the bracket resolves it.
 
-CONTROL
-  entry_mode="confirm" takes the same setups at the next bar's open after
-  confirmation, skipping the POC entirely. If the sequence carries direction,
-  that sees it; if only the POC entry works, the POC is doing the work; if
-  neither does, the pattern is dead. Run it before believing anything here.
-
 RESULTS (2026-08-20, 6 frozen NQ contracts, 387 sessions, $20/pt, $5 RT)
-  The pattern as specified does NOT work. What is inside it does.
+  The pattern as originally specified does NOT work. What is inside it does.
 
     entry_mode   n    pooled net   null pctile
     poc         66      -$3,675       21.5%     the full A->M->D->POC chain
     confirm    112     +$13,390       63.5%     A->M->D, POC entry removed
     sweep      253     +$62,730       99.0%     A->M only, D and POC removed
+                                                <- the default
 
   So each stage AFTER the manipulation destroys value. The overnight range and
   the prior day's range locate liquidity; the sweep-and-reclaim of one of those
@@ -102,10 +106,10 @@ RESULTS (2026-08-20, 6 frozen NQ contracts, 387 sessions, $20/pt, $5 RT)
   effect ought to show up in both, and it does not. Resolve that before any cpp.
 
 Usage
-  python backtest_mizan_p3.py --nq
-  MZ3_ENTRY_MODE=sweep python backtest_mizan_p3.py --nq
-  MZ3_ENTRY_MODE=sweep MZ3_PLACEBO_SHIFT=0.2 python backtest_mizan_p3.py --nq
-  python backtest_mizan_null.py 200 --nq --p3
+  python backtest_mizan_p3.py --nq                      # the sweep default
+  python backtest_mizan_null.py 200 --nq --p3           # its re-sign null
+  MZ3_PLACEBO_SHIFT=0.2 python backtest_mizan_p3.py --nq
+  MZ3_ENTRY_MODE=poc python backtest_mizan_p3.py --nq   # the falsified chain
 """
 from __future__ import annotations
 
@@ -165,15 +169,19 @@ class Params:
     dist_bars: int = 12
     dist_min_atr: float = 0.5
     # ── entry ──────────────────────────────────────────────────────────────
-    # "poc"     the strategy as specified
-    # "confirm" CONTROL: next bar's open after the distribution close
-    # "sweep"   CONTROL: next bar's open after the manipulation bar, with the
-    #           distribution stage skipped entirely. This is the only variant
-    #           with real statistical power -- ~0.83 setups/day against 0.17 for
-    #           the full chain -- so it, not the P/L of the full chain, is what
-    #           actually decides whether a frozen-level sweep-and-reclaim
-    #           predicts direction.
-    entry_mode: str = "poc"       # "poc" | "confirm" | "sweep"
+    # "sweep"   DEFAULT. Enter at the next bar's open after the manipulation
+    #           bar; the distribution stage and the POC pullback are both
+    #           skipped. It began as the control and became the strategy: it is
+    #           the only variant that clears its own re-sign null (99.0th), and
+    #           at ~0.65 fills/day against 0.17 it is also the only one with the
+    #           trade count to be judged at all.
+    # "confirm" A->M->D, entering at the next open after the distribution close.
+    #           63.5th percentile -- the D stage costs more than it adds.
+    # "poc"     the full chain with the pullback-to-value entry. 21.5th
+    #           percentile. RETAINED AS A FALSIFIED REFERENCE, not an option:
+    #           the setups that come back to value are disproportionately the
+    #           ones that failed. Do not run this expecting the numbers above.
+    entry_mode: str = "sweep"     # "sweep" | "confirm" | "poc"
     pb_bars: int = 12
     poc_tol_atr: float = 0.10
     require_through: float = 1.0
@@ -491,18 +499,20 @@ def main():
 
     lv = ("ONH/ONL" if p.use_on_levels else "") + \
          ("+PDH/PDL" if p.use_pd_levels else "")
-    entry = {"poc": f"limit at ON_POC{p.poc_tol_atr:+.2f}xATR, armed "
-                    f"{p.pb_bars} bars",
-             "confirm": "CONTROL -- next open after the distribution close",
-             "sweep": "CONTROL -- next open after the sweep, D stage SKIPPED",
+    entry = {"sweep": "next open after the sweep (D stage skipped)",
+             "confirm": "next open after the distribution close [63.5th pctile]",
+             "poc": f"limit at ON_POC{p.poc_tol_atr:+.2f}xATR, armed "
+                    f"{p.pb_bars} bars [FALSIFIED, 21.5th pctile]",
              }.get(p.entry_mode, p.entry_mode)
     print("Mizan_IOF_NQ_P3 -- daily power-of-three on FROZEN levels "
           f"({BAR_MINUTES}m)")
     print(f"  A: overnight 18:00-09:29 (>={p.min_on_bars} bars) -> frozen "
           f"{lv} + ON_POC + ATR")
+    dist = ("D: SKIPPED" if p.entry_mode == "sweep" else
+            f"D: close {p.dist_min_atr}xATR clear of ON_POC within "
+            f"{p.dist_bars} bars")
     print(f"  M: sweep a frozen level by >{p.sweep_eps_atr}xATR and reclaim, "
-          f"by {p.manip_end} | D: close {p.dist_min_atr}xATR clear of ON_POC "
-          f"within {p.dist_bars} bars")
+          f"by {p.manip_end} | {dist}")
     print(f"  E: {entry} | stop sweep{p.stop_buf_atr:+.2f}xATR "
           f"clamp[{p.min_stop_atr},{p.max_stop_atr}]xATR | "
           f"tgt={p.target_mode}({p.target_r}R) | flat {p.flatten_hhmm} | "
