@@ -98,6 +98,21 @@ from backtest_mizan_iof_nq import (BAR_MINUTES, MNQ, NQ_FROZEN, Cands,
 
 BASE = Path(__file__).parent
 
+# Uncorrelated instruments, frozen by `backtest_mizan_p3.py --freeze`.
+from backtest_mizan_p3 import CL_FROZEN, GC_FROZEN, SPECS, instrument_of
+
+
+def apply_spec(p: "Params", tag: str) -> "Params":
+    """Tick / point value / commission for crude and gold only.
+
+    NQ and MNQ tags are left exactly as the caller priced them, so adding the
+    uncorrelated pools cannot silently re-price the index results.
+    """
+    inst = instrument_of(tag)
+    if inst not in ("CL", "GC"):
+        return p
+    return params_from_env(replace(p, **SPECS[inst]))
+
 
 @dataclass(frozen=True)
 class Params:
@@ -124,6 +139,11 @@ class Params:
     sweep_max_pts: float = 10.0
     sweep_delta_pctile: float = 50.0
     reclaim_bars: int = 3
+    # The vectorised sweep gate also demands the sweeping bar CLOSE back inside
+    # (a same-bar rejection). Turning this off strips the "failed breakout" idea
+    # entirely and leaves a bare new-N-bar-low condition -- needed to attribute
+    # the edge, since the placebo showed the range boundary is not load-bearing.
+    require_same_bar_reclaim: int = 1
     # ── 4. acceptance ──────────────────────────────────────────────────────
     entry_mode: str = "pullback_low"
     # pullback_low | breakout_retest | poc_reclaim | sweep_now(control)
@@ -138,6 +158,13 @@ class Params:
     # so the CONSERVATIVE one is the default and the optimistic one has to be
     # asked for. Both are reported; the result holds either way.
     limit_fill_same_bar: int = 1
+    # PLACEBO. >0 pulls both range boundaries INWARD by this fraction of the
+    # range. The balance window, the absorption stage, the sweep mechanic, the
+    # depth band, the pullback entry and the stop geometry are all untouched --
+    # the only thing destroyed is the boundary's claim to be a real edge of
+    # value where resting orders sit. If the edge survives this, the "range" is
+    # doing no work and what is left is a generic buy-a-dip rule.
+    placebo_shift: float = 0.0
     # ── 5. risk ────────────────────────────────────────────────────────────
     stop_buf_atr: float = 0.15
     min_stop_atr: float = 0.30
@@ -264,6 +291,11 @@ def scan(bars: List[Bar], p: Params, funnel: bool = False) -> Cands:
     hi = _rolling_extreme(a.h, W, "max")          # over [i-W, i-1]
     lo = _rolling_extreme(a.l, W, "min")
     rng = hi - lo
+    if p.placebo_shift > 0.0:
+        # keep `rng` as the TRUE range so every ATR/range-scaled threshold and
+        # the measured-move target are unchanged; only the levels move
+        hi = hi - p.placebo_shift * rng
+        lo = lo + p.placebo_shift * rng
 
     # the PRECEDING 30 minutes: one 30-min bar's range, ending where the
     # balance window begins. Taken literally rather than smoothed -- a smoothed
@@ -303,8 +335,10 @@ def scan(bars: List[Bar], p: Params, funnel: bool = False) -> Cands:
         smin, smax = p.sweep_min_atr * atr_prev, p.sweep_max_atr * atr_prev
     depth_dn = lo - a.l                            # how far below rangeLo
     depth_up = a.h - hi
-    sw_dn = ok & (depth_dn >= smin) & (depth_dn <= smax) & (a.c > lo)
-    sw_up = ok & (depth_up >= smin) & (depth_up <= smax) & (a.c < hi)
+    rc_dn = (a.c > lo) if p.require_same_bar_reclaim else np.ones(n, bool)
+    rc_up = (a.c < hi) if p.require_same_bar_reclaim else np.ones(n, bool)
+    sw_dn = ok & (depth_dn >= smin) & (depth_dn <= smax) & rc_dn
+    sw_up = ok & (depth_up >= smin) & (depth_up <= smax) & rc_up
     cands_m = np.flatnonzero(sw_dn | sw_up)
     F["sweep"] = len(cands_m)
     if len(cands_m) == 0:
@@ -518,17 +552,24 @@ def run_engine(bars, p=None, side_mode=None):
 
 def contracts_for(scope: str) -> Dict[str, Path]:
     env = os.environ.get("MZA_TAGS")
-    everything = {**NQ_FROZEN, **MNQ}
+    everything = {**NQ_FROZEN, **MNQ, **CL_FROZEN, **GC_FROZEN}
     if env:
         return {t: everything[t] for t in env.split(",") if t in everything}
     if scope == "--mnq":
         return dict(MNQ)
+    if scope == "--cl":
+        return dict(CL_FROZEN)
+    if scope == "--gc":
+        return dict(GC_FROZEN)
+    if scope == "--uncorr":
+        return {**CL_FROZEN, **GC_FROZEN}
     if scope == "--all":
         return dict(everything)
     return dict(NQ_FROZEN)
 
 
 def run_one(tag: str, scid: Path, p: Params, write: bool = True) -> dict:
+    p = apply_spec(p, tag)
     bars = load_bars_cached(tag, scid, BAR_MINUTES)
     c = scan(bars, p)
     r = simulate(bars, c, p)
@@ -548,7 +589,8 @@ def run_one(tag: str, scid: Path, p: Params, write: bool = True) -> dict:
 
 def main():
     args = sys.argv[1:]
-    scope = next((a for a in args if a in ("--nq", "--mnq", "--all")), "--nq")
+    scope = next((a for a in args if a in ("--nq", "--mnq", "--all", "--cl",
+                                          "--gc", "--uncorr")), "--nq")
     p = params_from_env(spec_params() if "--spec" in args else None)
     if "--spec" in args:
         print("*** --spec: the supplied spec taken literally. Expect ~11 trades "
