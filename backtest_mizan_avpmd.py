@@ -178,6 +178,11 @@ class Params:
     session_end: int = 1530
     flatten_hhmm: int = 1555
     # ── contract ───────────────────────────────────────────────────────────
+    # 0 = 5-minute time bars. >0 = constant-VOLUME bars of that size, which is
+    # the other chart the spec allows. Note 5,000 contracts is a very different
+    # amount of time on the mini than on the micro -- see bars_per_day below --
+    # so range_bars has to be re-chosen, not carried over.
+    vol_bars: int = 0
     tick: float = 0.25
     qty: int = 1
     pt_val: float = 2.0            # MNQ
@@ -550,6 +555,14 @@ def run_engine(bars, p=None, side_mode=None):
                     side_mode if side_mode is not None else SIDE_MODE)
 
 
+def load_bars(tag: str, scid: Path, p: Params):
+    """Time bars, or constant-volume bars, per p.vol_bars."""
+    if p.vol_bars > 0:
+        from backtest_sweepabs_propeval import load_volume_bars_cached
+        return load_volume_bars_cached(tag, scid, p.vol_bars)[0]
+    return load_bars_cached(tag, scid, BAR_MINUTES)
+
+
 def contracts_for(scope: str) -> Dict[str, Path]:
     env = os.environ.get("MZA_TAGS")
     everything = {**NQ_FROZEN, **MNQ, **CL_FROZEN, **GC_FROZEN}
@@ -570,7 +583,7 @@ def contracts_for(scope: str) -> Dict[str, Path]:
 
 def run_one(tag: str, scid: Path, p: Params, write: bool = True) -> dict:
     p = apply_spec(p, tag)
-    bars = load_bars_cached(tag, scid, BAR_MINUTES)
+    bars = load_bars(tag, scid, p)
     c = scan(bars, p)
     r = simulate(bars, c, p)
     if write:

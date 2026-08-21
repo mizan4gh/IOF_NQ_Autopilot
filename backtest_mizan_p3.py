@@ -213,7 +213,14 @@ class Params:
     #           percentile. RETAINED AS A FALSIFIED REFERENCE, not an option:
     #           the setups that come back to value are disproportionately the
     #           ones that failed. Do not run this expecting the numbers above.
-    entry_mode: str = "sweep"     # "sweep" | "confirm" | "poc"
+    entry_mode: str = "sweep"     # "sweep" | "sweep_limit" | "confirm" | "poc"
+    # sweep_limit: instead of a market order at the next open, rest a LIMIT
+    # limit_off_atr x ATR back toward the sweep extreme, armed limit_bars bars.
+    # Better price on the setups that come back; NO FILL on the ones that run.
+    # That second half is the whole question -- a reclaim that works often does
+    # not retrace, so this can quietly select for the weaker half of the sample.
+    limit_off_atr: float = 0.15
+    limit_bars: int = 3
     pb_bars: int = 12
     poc_tol_atr: float = 0.10
     require_through: float = 1.0
@@ -434,7 +441,21 @@ def scan(bars: List[Bar], p: Params) -> Cands:
 
         # ── E: pullback to the frozen POC ──────────────────────────────────
         e, fill = -1, 0.0
-        if p.entry_mode in ("confirm", "sweep"):
+        manage = -1
+        if p.entry_mode == "sweep_limit":
+            lv = float(round_to_tick(a.c[m] - side * p.limit_off_atr * A))
+            thru = p.require_through * TICK
+            for j in range(m + 1, min(m + 1 + p.limit_bars, rth_end)):
+                if a.hhmm[j] > p.session_end:
+                    break
+                if (a.c[j] < invalid) if side > 0 else (a.c[j] > invalid):
+                    break
+                if ((a.l[j] <= lv - thru) if side > 0 else (a.h[j] >= lv + thru)):
+                    e = j
+                    fill = min(a.o[j], lv) if side > 0 else max(a.o[j], lv)
+                    manage = j          # limit fill -> conservative, own bar
+                    break
+        elif p.entry_mode in ("confirm", "sweep"):
             j = d + 1
             if j < rth_end and a.hhmm[j] <= p.session_end:
                 e, fill = j, float(a.o[j])
@@ -452,6 +473,8 @@ def scan(bars: List[Bar], p: Params) -> Cands:
                     break
         if e < 0:
             continue
+        if manage < 0:
+            manage = e if p.entry_mode in ("confirm", "sweep") else e + 1
 
         raw = abs(fill - invalid) + p.stop_buf_atr * A
         sp = float(_rt(np.clip(raw, p.min_stop_atr * A,
@@ -467,8 +490,7 @@ def scan(bars: List[Bar], p: Params) -> Cands:
             if far:
                 tgt = abs((min(far) if side > 0 else max(far)) - fill)
         out.append((e, side, float(fill), sp, float(_rt(tgt, p.tick)), A, poc,
-                    onh - onl, m, e - m,
-                    e if p.entry_mode in ("confirm", "sweep") else e + 1))
+                    onh - onl, m, e - m, manage))
 
     if not out:
         c = _empty()

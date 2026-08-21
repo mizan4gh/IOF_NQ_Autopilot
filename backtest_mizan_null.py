@@ -66,7 +66,12 @@ def main():
         # per-contract tick / point value, so a mixed or non-index pool is not
         # priced with the NQ spec
         q = MZ.apply_spec(p, tag) if hasattr(MZ, "apply_spec") else p
-        bars = load_bars_cached(tag, scid, MZ.BAR_MINUTES)
+        # MUST go through the module's own loader: calling load_bars_cached
+        # directly silently ignored vol_bars and null-tested 5-minute bars
+        # against a volume-bar result. The tell was a null mean identical to
+        # the previous run's -- see the dead-knob note.
+        bars = (MZ.load_bars(tag, scid, q) if hasattr(MZ, "load_bars")
+                else load_bars_cached(tag, scid, MZ.BAR_MINUTES))
         prepared.append((bars, MZ.scan(bars, q), q))
         tags.append(tag)
 
