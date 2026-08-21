@@ -12,7 +12,8 @@
 //
 //      ACCUMULATION   18:00 -> 09:29    freezes ONH, ONL and ATR at 09:30
 //      MANIPULATION   09:30 -> 12:00    a frozen level is swept and reclaimed
-//      ENTRY                            market, next bar
+//      ENTRY                            limit, 0.15xATR back toward the sweep,
+//                                       armed 3 bars   (or market, next bar)
 //
 //  WHAT IS DELIBERATELY MISSING
 //  ----------------------------
@@ -38,9 +39,13 @@
 //  A placebo that keeps the sweep mechanic and the trade count but pulls each
 //  level inward by a fraction of the overnight range collapses the result to
 //  the 83rd / 19th / 18th percentile, so the levels are load-bearing rather
-//  than decorative. Every threshold below is an ATR multiple and never a point
-//  count: this index traded 20k to 30k across the test contracts, and a
-//  points-denominated gate silently selects a biased subsample when it does.
+//  than decorative. That holds for the MARKET entry. Under the limit entry the
+//  placebo does not collapse at all — see THE ENTRY below, because it is the
+//  reason to think twice about the default.
+//
+//  Every threshold below is an ATR multiple and never a point count: this index
+//  traded 20k to 30k across the test contracts, and a points-denominated gate
+//  silently selects a biased subsample when it does.
 //
 //  SESSION MODEL
 //  -------------
@@ -56,6 +61,54 @@
 //  where this file orphans that evening and skips the day on the bar count.
 //  Skipping is the safe side of that difference.)
 //
+//  THE ENTRY — LIMIT (default) OR MARKET
+//  -------------------------------------
+//  Entry Mode 1 (LIMIT, the default) rests a limit 0.15 x ATR back toward the
+//  sweep extreme — under the reclaim bar's close for a long, over it for a
+//  short — armed for 3 bars. The order is pulled if the arm window expires, if
+//  a later bar CLOSES back beyond the sweep extreme, or at the flatten time.
+//  Exits are unchanged: the stop is a stop-market, the target a resting limit.
+//
+//  Entry Mode 0 restores the market order at the next bar's open. READ THIS
+//  BEFORE CHOOSING: mode 0 is the configuration every number in STATUS below
+//  was measured on. Mode 1 looks better on every headline and is worse where
+//  it counts. Re-run on the 6 frozen NQ contracts, 387 sessions, 2026-08-21:
+//
+//                          mode 0 MARKET       mode 1 LIMIT
+//      trades              253 (0.65/day)      105 (0.27/day)
+//      pooled net             +$62,730            +$91,795
+//      ship gate               5/6 FAIL            6/6 PASS
+//      re-sign null              99.0th             100.0th
+//      PLACEBO shift 0.10        83.0th             100.0th
+//      PLACEBO shift 0.20        19.5th             100.0th
+//
+//  The last two rows are the whole story. Pull every frozen level inward by a
+//  fraction of the overnight range — keep the sweep mechanic, destroy the
+//  level's structural meaning — and the market rule collapses to noise, which
+//  is what a real level effect is supposed to do. The limit rule does not
+//  collapse. It scores at the ceiling whether the levels mean anything or not,
+//  because what is carrying it is no longer the level: it is the retrace
+//  filter. A setup that never comes back 0.15 x ATR simply never gets entered,
+//  and per the measurement in 069d4e0 that unfilled half is the losing half —
+//  the price improvement on the filled half is about $16 a trade, i.e. nothing.
+//
+//  So mode 1's extra $29k is a filter wearing a fill's clothing. It may well be
+//  a real filter — the order fills or it does not, there is no hindsight in it
+//  — but it is a DIFFERENT claim from the one this file's levels make, it has
+//  not been tested as one, and it is bought by throwing away 59% of the sample.
+//  At 0.27 trades/day the uncorrelated instruments are left with ~20 trades,
+//  which cannot validate anything.
+//
+//  One setup per session is consumed by the SWEEP, not by the fill: a limit
+//  that expires unfilled does not free the day for a second sweep. That is what
+//  backtest_mizan_p3.py measures (its scan breaks on the first sweep of the
+//  day regardless of what the entry does afterwards) and the two have to agree.
+//
+//  The backtest also demands the price trade one tick THROUGH the limit before
+//  it books a fill. That is a fill-model conservatism, not part of the rule, so
+//  it is deliberately not reproduced here; a real resting order at the same
+//  price fills at least as often as the measurement assumed.
+//
 //  NO LOOK-AHEAD
 //  -------------
 //  Every decision is made from bars that have CLOSED. The bar loop walks
@@ -63,16 +116,20 @@
 //  closes, so no bar is ever evaluated while it is still forming and none is
 //  silently skipped when a new bar arrives.
 //
-//  The entry is a market order submitted after the signal bar closes, so it
-//  fills around the next bar's open, and the bracket is attached to the parent
-//  as OFFSETS from the actual fill. That matters: the measurement manages the
-//  trade against the FILL BAR'S OWN RANGE. Managing from the bar after the fill
-//  instead deletes the first bar of adverse excursion from every trade and was
-//  worth $6,400 of fiction in the Python before it was found. If you port this
-//  logic anywhere else, check that first.
+//  The entry is submitted after the signal bar closes — a market order fills
+//  around the next bar's open, a limit rests from that bar forward — and the
+//  bracket is attached to the parent as OFFSETS from the actual fill. That
+//  matters: the measurement manages the trade against the FILL BAR'S OWN RANGE.
+//  Managing from the bar after the fill instead deletes the first bar of
+//  adverse excursion from every trade and was worth $6,400 of fiction in the
+//  Python before it was found. If you port this logic anywhere else, check
+//  that first.
 //
 //  STATUS — NOT VALIDATED FOR A FUNDED ACCOUNT
 //  -------------------------------------------
+//  Everything below describes ENTRY MODE 0. Mode 1 has no line of its own here
+//  because it has not earned one — see THE ENTRY above.
+//
 //  What it has:  99.0th percentile against a 200-draw re-sign null on 6 frozen
 //                NQ contracts (253 trades, +$62,730, pooled t=+2.47); survives
 //                3 ticks of slippage at the 98.5th; OOS-2026 3/3 at the 99.5th;
@@ -118,7 +175,10 @@ enum {
     PI_SetupTaken,
     PI_Locked,
     PI_Dir,
-    PI_WarnedNoOn
+    PI_WarnedNoOn,
+    PI_PendID,        // internal id of a resting entry limit, 0 = none
+    PI_PendBar,       // bar the limit was submitted on (the sweep bar)
+    PI_PendSide
 };
 enum {
     PF_OnHigh = 1,
@@ -129,7 +189,9 @@ enum {
     PF_PdLow,
     PF_AtrFrozen,
     PF_DayOpenPnL,
-    PF_StopPts
+    PF_StopPts,
+    PF_PendInvalid,   // the sweep extreme: a close beyond it kills the limit
+    PF_PendLimit
 };
 
 // ============================================================================
@@ -163,6 +225,11 @@ SCSFExport scsf_Mizan_IOF_NQ(SCStudyInterfaceRef sc)
     SCInputRef IN_DAILY_LOSS = sc.Input[17];
     SCInputRef IN_ATR_PER    = sc.Input[18];
     SCInputRef IN_LOG        = sc.Input[19];
+    // Appended, never inserted: Sierra maps saved chart settings by input
+    // INDEX, so renumbering 0-19 would silently re-point every existing chart.
+    SCInputRef IN_ENTRY_MODE = sc.Input[20];
+    SCInputRef IN_LIM_OFF    = sc.Input[21];
+    SCInputRef IN_LIM_BARS   = sc.Input[22];
 
     if (sc.SetDefaults)
     {
@@ -170,11 +237,16 @@ SCSFExport scsf_Mizan_IOF_NQ(SCStudyInterfaceRef sc)
         sc.StudyDescription =
             "Sweep-and-reclaim of a frozen overnight or prior-day extreme. "
             "ONH/ONL/PDH/PDL and ATR freeze at 09:30; the first RTH bar to "
-            "break one of them and close back inside is the entry, market on "
-            "the next bar, ATR-clamped stop off the sweep extreme, 2R target. "
-            "One setup per session. Needs a 24-hour chart session. NOT "
-            "validated for a funded account - 5/6 on the ship gate, does not "
-            "port to ES, no uncorrelated instrument. Sim first.";
+            "break one of them and close back inside is the setup. Entry is a "
+            "limit 0.15xATR back toward the sweep, armed 3 bars (Entry Mode 0 "
+            "for the market order at the next open, which is the configuration "
+            "that was measured). Stop-market off the sweep extreme, ATR-clamped, "
+            "resting limit at 2R. One setup per session, consumed by the sweep "
+            "whether or not the limit fills. Needs a 24-hour chart session, and "
+            "the bar-count gates assume 5-minute bars. NOT validated for a "
+            "funded account - 5/6 on the ship gate, does not port to ES, no "
+            "uncorrelated instrument, and the limit entry fails the placebo. "
+            "Sim first.";
 
         sc.AutoLoop = 1;
         sc.GraphRegion = 0;
@@ -225,6 +297,13 @@ SCSFExport scsf_Mizan_IOF_NQ(SCStudyInterfaceRef sc)
         IN_ATR_PER.Name   = "ATR Period";                  IN_ATR_PER.SetInt(14);
         IN_LOG.Name       = "Log Level (0=off,1=trades,2=verbose)";
         IN_LOG.SetInt(1);
+        // Mode 0 is the configuration STATUS was measured on and the one that
+        // passes the placebo. Mode 1 is the default because it is what was
+        // asked for, not because it is better evidenced. See THE ENTRY.
+        IN_ENTRY_MODE.Name = "Entry (0=market next bar, 1=limit pullback)";
+        IN_ENTRY_MODE.SetInt(1);
+        IN_LIM_OFF.Name   = "Limit Offset (x ATR)";        IN_LIM_OFF.SetFloat(0.15f);
+        IN_LIM_BARS.Name  = "Limit Armed Bars";            IN_LIM_BARS.SetInt(3);
         return;
     }
 
@@ -241,6 +320,9 @@ SCSFExport scsf_Mizan_IOF_NQ(SCStudyInterfaceRef sc)
     const int   MIN_RTH    = IN_MIN_RTH.GetInt();
     const float DAILY_LOSS = IN_DAILY_LOSS.GetFloat();
     const int   LOG        = IN_LOG.GetInt();
+    const int   USE_LIMIT  = (IN_ENTRY_MODE.GetInt() != 0);
+    const float LIM_OFF    = IN_LIM_OFF.GetFloat();
+    const int   LIM_BARS   = (IN_LIM_BARS.GetInt() > 0) ? IN_LIM_BARS.GetInt() : 1;
 
     sc.SendOrdersToTradeService = (IN_LIVE.GetInt() != 0);
 
@@ -255,6 +337,11 @@ SCSFExport scsf_Mizan_IOF_NQ(SCStudyInterfaceRef sc)
     int&   Locked     = sc.GetPersistentInt(PI_Locked);
     int&   Dir        = sc.GetPersistentInt(PI_Dir);
     int&   WarnedNoOn = sc.GetPersistentInt(PI_WarnedNoOn);
+    int&   PendID     = sc.GetPersistentInt(PI_PendID);
+    int&   PendBar    = sc.GetPersistentInt(PI_PendBar);
+    int&   PendSide   = sc.GetPersistentInt(PI_PendSide);
+    float& PendInv    = sc.GetPersistentFloat(PF_PendInvalid);
+    float& PendLim    = sc.GetPersistentFloat(PF_PendLimit);
     float& OnHigh     = sc.GetPersistentFloat(PF_OnHigh);
     float& OnLow      = sc.GetPersistentFloat(PF_OnLow);
     float& RthHigh    = sc.GetPersistentFloat(PF_RthHigh);
@@ -270,6 +357,8 @@ SCSFExport scsf_Mizan_IOF_NQ(SCStudyInterfaceRef sc)
         SessIdP = -1;  LastBar = -1;  OnBars = 0;  RthBars = 0;
         PrevRthBar = 0;  SetupTaken = 0;  Locked = 0;  Dir = 0;
         WarnedNoOn = 0;
+        PendID = 0;  PendBar = -1;  PendSide = 0;
+        PendInv = 0.f;  PendLim = 0.f;
         OnHigh = -FLT_MAX;  OnLow = FLT_MAX;
         RthHigh = -FLT_MAX; RthLow = FLT_MAX;
         PdHigh = 0.f;  PdLow = 0.f;  AtrFrozen = 0.f;  StopPts = 0.f;
@@ -282,11 +371,20 @@ SCSFExport scsf_Mizan_IOF_NQ(SCStudyInterfaceRef sc)
     const int   flat   = (pos.PositionQuantity == 0);
     const float dayPnL = (pos.CumulativeProfitLoss - DayOpenPnL) + pos.OpenProfitLoss;
 
+    // A resting limit that has filled is no longer ours to cancel. Checked here
+    // rather than only in the bar loop because the bar loop runs once per CLOSED
+    // bar: a limit that fills and then hits its target inside the same 5-minute
+    // bar would be flat again by the time the loop next looked, and would get
+    // logged as expired or invalidated. The order state is what the trade log
+    // gets audited from, so it has to be right.
+    if (PendID != 0 && !flat) PendID = 0;
+
     // ── hard flatten. Intrabar on purpose: a time stop that waits for a bar
     //    close is not a time stop. ────────────────────────────────────────────
     {
         const int hhmmNow = HhmmFromSeconds(sc.BaseDateTimeIn[Idx].GetTimeInSeconds());
-        if (hhmmNow >= FLAT_TIME && hhmmNow < ON_START && !flat)
+        const int atFlat  = (hhmmNow >= FLAT_TIME && hhmmNow < ON_START);
+        if (atFlat && !flat)
         {
             sc.FlattenAndCancelAllOrders();
             if (LOG >= 1)
@@ -304,6 +402,22 @@ SCSFExport scsf_Mizan_IOF_NQ(SCStudyInterfaceRef sc)
                 sc.AddMessageToLog(m, 0);
             }
             if (!flat) sc.FlattenAndCancelAllOrders();
+        }
+        // Belt and braces on an unfilled entry limit. The arm window makes this
+        // unreachable at the defaults — a sweep must land by 12:00 and the order
+        // lives 3 bars — but a widened MANIP_END or Limit Armed Bars would make
+        // it reachable, and a resting entry order that outlives the flatten time
+        // is the one way this study can put on a position it never intended.
+        if (PendID != 0 && flat && (atFlat || Locked))
+        {
+            sc.CancelAllOrders();
+            if (LOG >= 1)
+            {
+                SCString m; m.Format("[MZ] LIMIT CANCEL id=%d (%s)", PendID,
+                                     atFlat ? "flat time" : "day locked");
+                sc.AddMessageToLog(m, 0);
+            }
+            PendID = 0;
         }
     }
 
@@ -340,6 +454,8 @@ SCSFExport scsf_Mizan_IOF_NQ(SCStudyInterfaceRef sc)
             SetupTaken = 0;
             Locked     = 0;
             WarnedNoOn = 0;
+            PendID     = 0;   PendBar = -1;  PendSide = 0;
+            PendInv    = 0.f; PendLim = 0.f;
             DayOpenPnL = pos.CumulativeProfitLoss;
         }
 
@@ -379,6 +495,50 @@ SCSFExport scsf_Mizan_IOF_NQ(SCStudyInterfaceRef sc)
             if (IN_USE_ON.GetInt()) { SG_ONH[b] = OnHigh; SG_ONL[b] = OnLow; }
             if (IN_USE_PD.GetInt() && PrevRthBar >= MIN_RTH)
             { SG_PDH[b] = PdHigh; SG_PDL[b] = PdLow; }
+        }
+
+        // ── a resting entry limit: filled, invalidated, or expired ──────────
+        // Aged in CLOSED bars off the sweep bar, which is how the Python counts
+        // the arm window. PendBar+1 .. PendBar+LIM_BARS are the bars the order
+        // is live for, so cancelling at the close of PendBar+LIM_BARS retires it
+        // after its last chance and before the bar that has none.
+        //
+        // The Python tests invalidation BEFORE the fill on the same bar, so a
+        // bar that closes back through the sweep extreme voids a touch that
+        // happened earlier inside it. A real resting order cannot be that
+        // clever — intrabar it is simply filled. Live is marginally more
+        // permissive than the measurement here and cannot be made otherwise.
+        if (PendID != 0)
+        {
+            if (!flat)
+            {
+                PendID = 0;         // filled; the attached bracket owns it now
+            }
+            else
+            {
+                const char* why = 0;
+                if ((PendSide > 0) ? (sc.Close[b] < PendInv)
+                                   : (sc.Close[b] > PendInv))
+                    why = "INVALIDATED";
+                else if (b - PendBar >= LIM_BARS)
+                    why = "EXPIRED";
+
+                if (why)
+                {
+                    sc.CancelAllOrders();
+                    if (LOG >= 1)
+                    {
+                        SCString m;
+                        m.Format("[MZ] LIMIT %s id=%d  %s lim=%.2f sweep=%.2f  "
+                                 "bar %d %04d (%d bars armed)",
+                                 why, PendID,
+                                 (PendSide > 0) ? "LONG" : "SHORT",
+                                 PendLim, PendInv, b, hhmm, b - PendBar);
+                        sc.AddMessageToLog(m, 0);
+                    }
+                    PendID = 0;
+                }
+            }
         }
 
         // ── entry gates ─────────────────────────────────────────────────────
@@ -426,7 +586,18 @@ SCSFExport scsf_Mizan_IOF_NQ(SCStudyInterfaceRef sc)
         // clamped rather than skipped. That is not this repo's usual convention
         // and it is deliberate: clamping is what was measured.
         const float invalid = (side > 0) ? sc.Low[b] : sc.High[b];
-        float sp = fabsf(sc.Close[b] - invalid)
+
+        // The limit sits LIM_OFF x ATR back toward the sweep extreme: under the
+        // reclaim close for a long, over it for a short. The stop is then
+        // measured from where the entry will actually be, not from a close the
+        // order is resting under — market mode has no better proxy than the
+        // close, but limit mode knows its own price, and the Python builds the
+        // stop from the fill in both.
+        const float limitPx  = TRound(sc.Close[b] - side * LIM_OFF * AtrFrozen,
+                                      TICK);
+        const float entryRef = USE_LIMIT ? limitPx : sc.Close[b];
+
+        float sp = fabsf(entryRef - invalid)
                  + IN_STOP_BUF.GetFloat() * AtrFrozen;
         const float loStop = IN_MIN_STOP.GetFloat() * AtrFrozen;
         const float hiStop = IN_MAX_STOP.GetFloat() * AtrFrozen;
@@ -437,15 +608,28 @@ SCSFExport scsf_Mizan_IOF_NQ(SCStudyInterfaceRef sc)
         const float tgt = TRound(sp * IN_TARGET_R.GetFloat(), TICK);
 
         // ── submit, bracket attached as OFFSETS from the real fill ──────────
-        // Offsets, not absolute prices: the signal bar's close is only a proxy
-        // for a fill that happens on the next bar, and pricing the bracket off
-        // the proxy would leave the R-multiple drifting with the overnight gap.
+        // Offsets, not absolute prices: the entry price is not known until the
+        // parent fills — a market order is only proxied by this close, and a
+        // limit can be improved by a gap through it — and pricing the bracket
+        // off the proxy would leave the R-multiple drifting.
+        //
+        // Both exits stay as they were: Stop1Offset is a stop-market, so it
+        // leaves at market once triggered, and Target1Offset is a resting limit
+        // that fills at the target price or better. Only the entry is passive.
         s_SCNewOrder o;
         o.OrderQuantity = QTY;
-        o.OrderType     = SCT_ORDERTYPE_MARKET;
         o.TimeInForce   = SCT_TIF_DAY;
         o.Stop1Offset   = sp;
         o.Target1Offset = tgt;
+        if (USE_LIMIT)
+        {
+            o.OrderType = SCT_ORDERTYPE_LIMIT;
+            o.Price1    = limitPx;
+        }
+        else
+        {
+            o.OrderType = SCT_ORDERTYPE_MARKET;
+        }
 
         const int rc = (side > 0) ? (int)sc.BuyEntry(o) : (int)sc.SellEntry(o);
         if (rc <= 0)
@@ -464,9 +648,23 @@ SCSFExport scsf_Mizan_IOF_NQ(SCStudyInterfaceRef sc)
             continue;
         }
 
+        // The SWEEP consumes the day, not the fill. A limit that expires
+        // unfilled does NOT re-open the session for a second sweep — the
+        // Python's scan breaks on the first sweep of the day whatever the entry
+        // does afterwards, and a cpp that retried would be measuring a
+        // different rule. The marker below therefore marks the SETUP; on a
+        // limit it is drawn before anyone knows whether it fills.
         SetupTaken = 1;
         Dir        = side;
         StopPts    = sp;
+        if (USE_LIMIT)
+        {
+            PendID   = rc;      // BuyEntry/SellEntry return the internal id
+            PendBar  = b;
+            PendSide = side;
+            PendInv  = invalid;
+            PendLim  = limitPx;
+        }
         if (side > 0) SG_LONG[b] = sc.Low[b]  - AtrFrozen * 0.25f;
         else          SG_SHRT[b] = sc.High[b] + AtrFrozen * 0.25f;
 
@@ -476,12 +674,22 @@ SCSFExport scsf_Mizan_IOF_NQ(SCStudyInterfaceRef sc)
                 (side > 0) ? ((lvl == OnLow)  ? "ONL" : "PDL")
                            : ((lvl == OnHigh) ? "ONH" : "PDH");
             SCString m;
-            m.Format("[MZ ENTRY] %-5s swept %s=%.2f  bar %d %04d  "
-                     "sweep=%.2f close=%.2f  stop=%.2fpt tgt=%.2fpt  ATR=%.2f  "
-                     "ON=[%.2f,%.2f] PD=[%.2f,%.2f]",
-                     (side > 0) ? "LONG" : "SHORT", which, lvl, b, hhmm,
-                     invalid, sc.Close[b], sp, tgt, AtrFrozen,
-                     OnLow, OnHigh, PdLow, PdHigh);
+            if (USE_LIMIT)
+                m.Format("[MZ SETUP] %-5s swept %s=%.2f  bar %d %04d  "
+                         "sweep=%.2f close=%.2f  LIMIT %.2f armed %d bars  "
+                         "stop=%.2fpt tgt=%.2fpt  ATR=%.2f  "
+                         "ON=[%.2f,%.2f] PD=[%.2f,%.2f]",
+                         (side > 0) ? "LONG" : "SHORT", which, lvl, b, hhmm,
+                         invalid, sc.Close[b], limitPx, LIM_BARS, sp, tgt,
+                         AtrFrozen, OnLow, OnHigh, PdLow, PdHigh);
+            else
+                m.Format("[MZ ENTRY] %-5s swept %s=%.2f  bar %d %04d  "
+                         "sweep=%.2f close=%.2f  MARKET  "
+                         "stop=%.2fpt tgt=%.2fpt  ATR=%.2f  "
+                         "ON=[%.2f,%.2f] PD=[%.2f,%.2f]",
+                         (side > 0) ? "LONG" : "SHORT", which, lvl, b, hhmm,
+                         invalid, sc.Close[b], sp, tgt, AtrFrozen,
+                         OnLow, OnHigh, PdLow, PdHigh);
             sc.AddMessageToLog(m, 0);
         }
     }
