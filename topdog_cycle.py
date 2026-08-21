@@ -156,11 +156,14 @@ def build_time_bars(recs: np.ndarray, minutes: int = BAR_MINUTES,
         ro = float(rec["open"]) / price_scale
         rh = float(rec["high"]) / price_scale
         rl = float(rec["low"]) / price_scale
-        if not np.isfinite(ro) or ro == 0.0:
+        # Sierra's "no value" sentinel is -1.999e37, not 0, and it is what the
+        # tick format puts in the OPEN field of every record (0 on the rest).
+        # Testing == 0.0 let ~10-30% of bar opens through as -2e37.
+        if not np.isfinite(ro) or ro <= 0.0:
             ro = rc
-        if not np.isfinite(rh) or rh == 0.0:
+        if not np.isfinite(rh) or rh <= 0.0:
             rh = rc
-        if not np.isfinite(rl) or rl == 0.0:
+        if not np.isfinite(rl) or rl <= 0.0:
             rl = rc
 
         if key != bucket:

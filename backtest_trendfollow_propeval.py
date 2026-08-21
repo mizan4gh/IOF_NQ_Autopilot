@@ -809,12 +809,30 @@ def write_csv(r: Result, path: Path):
                         f"{t.mae:.2f}", f"{t.mfe:.2f}"])
 
 
+# The IS/OOS split used to test ADX_MIN=30: fit on the three 2025 expiries,
+# hold out everything that expires in 2026 plus the genuine MNQ contract.
+IS_TAGS = ("NQU25", "NQZ25", "NQM5")
+OOS_TAGS = ("NQH6", "NQM6", "NQU26", "MNQU6")
+
+
 def contracts_for(scope: str) -> Dict[str, Path]:
+    # TF_TAGS=NQH6,NQM6,MNQU6 -- explicit subset, overrides scope. NQU26 sits
+    # entirely inside MNQU6's date range (28 of 28 days, same index, micro vs
+    # mini), so any pool holding both counts that window twice.
+    env = os.environ.get("TF_TAGS")
+    if env:
+        everything = {**MNQ, **NQ_FROZEN}
+        return {t: everything[t] for t in env.split(",") if t in everything}
     if scope == "--mnq":
         return dict(MNQ)
     if scope == "--nq":
         return dict(NQ_FROZEN)
-    return {**MNQ, **NQ_FROZEN}
+    everything = {**MNQ, **NQ_FROZEN}
+    if scope == "--is":
+        return {t: everything[t] for t in IS_TAGS}
+    if scope == "--oos":
+        return {t: everything[t] for t in OOS_TAGS}
+    return everything
 
 
 def run_one(tag: str, scid: Path, p: Params, write: bool = True) -> dict:

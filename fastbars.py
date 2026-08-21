@@ -67,8 +67,8 @@ def build_time_bars_fast(recs: np.ndarray, minutes: int = 5,
     """Aggregate .scid ticks into fixed-clock bars stamped in US/Eastern.
 
     Mirrors build_time_bars exactly, including its OHL fallback: Sierra emits
-    0 / non-finite OHL on ask-side single-tick records, and min(low, 0) silently
-    corrupts every range-derived series downstream.
+    0 / -1.999e37 / non-finite OHL on tick records, and taking those at face
+    value silently corrupts every price-derived series downstream.
     """
     tot = recs["tot_vol"].astype(np.int64)
     keep = tot != 0
@@ -97,7 +97,11 @@ def build_time_bars_fast(recs: np.ndarray, minutes: int = 5,
     h = recs["high"][keep].astype(np.float64) / price_scale
     lo_ = recs["low"][keep].astype(np.float64) / price_scale
     for arr in (o, h, lo_):
-        bad = ~np.isfinite(arr) | (arr == 0.0)
+        # Sierra's "no value" sentinel is -1.999e37, not 0, and in the tick
+        # format the OPEN field is ALWAYS one or the other -- never a real
+        # price. Testing == 0.0 left ~10-30% of bar opens at -2e37, which is
+        # invisible until something prices a fill off bar.open.
+        bad = ~np.isfinite(arr) | (arr <= 0.0)
         arr[bad] = c[bad]
 
     b_open = o[gs]
