@@ -12,8 +12,8 @@
 //
 //      ACCUMULATION   18:00 -> 09:29    freezes ONH, ONL and ATR at 09:30
 //      MANIPULATION   09:30 -> 12:00    a frozen level is swept and reclaimed
-//      ENTRY                            limit, 0.15xATR back toward the sweep,
-//                                       armed 3 bars   (or market, next bar)
+//      ENTRY                            market, next bar   (Entry Mode 1 rests
+//                                       a limit instead — read THE ENTRY first)
 //
 //  WHAT IS DELIBERATELY MISSING
 //  ----------------------------
@@ -61,18 +61,21 @@
 //  where this file orphans that evening and skips the day on the bar count.
 //  Skipping is the safe side of that difference.)
 //
-//  THE ENTRY — LIMIT (default) OR MARKET
+//  THE ENTRY — MARKET (default) OR LIMIT
 //  -------------------------------------
-//  Entry Mode 1 (LIMIT, the default) rests a limit 0.15 x ATR back toward the
-//  sweep extreme — under the reclaim bar's close for a long, over it for a
-//  short — armed for 3 bars. The order is pulled if the arm window expires, if
-//  a later bar CLOSES back beyond the sweep extreme, or at the flatten time.
-//  Exits are unchanged: the stop is a stop-market, the target a resting limit.
+//  Entry Mode 0, the DEFAULT, sends a market order after the signal bar closes,
+//  so it fills around the next bar's open. This is the configuration every
+//  number in STATUS below was measured on.
 //
-//  Entry Mode 0 restores the market order at the next bar's open. READ THIS
-//  BEFORE CHOOSING: mode 0 is the configuration every number in STATUS below
-//  was measured on. Mode 1 makes more money and is worse where it counts.
-//  Both columns re-run on the 6 frozen NQ contracts, 387 sessions, 2026-08-21:
+//  Entry Mode 1 rests a limit 0.15 x ATR back toward the sweep extreme — under
+//  the reclaim bar's close for a long, over it for a short — armed for 3 bars.
+//  The order is pulled if the arm window expires, if a later bar CLOSES back
+//  beyond the sweep extreme, or at the flatten time. Exits are identical in
+//  both modes: the stop is a stop-market, the target a resting limit.
+//
+//  Mode 1 makes more money and is worse where it counts, which is why it is not
+//  the default. Both columns re-run on the 6 frozen NQ contracts, 387 sessions,
+//  2026-08-21:
 //
 //                          mode 0 MARKET       mode 1 LIMIT
 //      trades              253 (0.65/day)      222 (0.57/day)
@@ -246,9 +249,10 @@ SCSFExport scsf_Mizan_IOF_NQ(SCStudyInterfaceRef sc)
             "Sweep-and-reclaim of a frozen overnight or prior-day extreme. "
             "ONH/ONL/PDH/PDL and ATR freeze at 09:30; the first RTH bar to "
             "break one of them and close back inside is the setup. Entry is a "
-            "limit 0.15xATR back toward the sweep, armed 3 bars (Entry Mode 0 "
-            "for the market order at the next open, which is the configuration "
-            "that was measured). Stop-market off the sweep extreme, ATR-clamped, "
+            "market order on the next bar (Entry Mode 1 rests a limit 0.15xATR "
+            "back toward the sweep instead - more profitable, but it fails the "
+            "placebo, so it is not the default). Stop-market off the sweep "
+            "extreme, ATR-clamped, "
             "resting limit at 2R. One setup per session, consumed by the sweep "
             "whether or not the limit fills. Needs a 24-hour chart session, and "
             "the bar-count gates assume 5-minute bars. NOT validated for a "
@@ -305,11 +309,12 @@ SCSFExport scsf_Mizan_IOF_NQ(SCStudyInterfaceRef sc)
         IN_ATR_PER.Name   = "ATR Period";                  IN_ATR_PER.SetInt(14);
         IN_LOG.Name       = "Log Level (0=off,1=trades,2=verbose)";
         IN_LOG.SetInt(1);
-        // Mode 0 is the configuration STATUS was measured on and the one that
-        // passes the placebo. Mode 1 is the default because it is what was
-        // asked for, not because it is better evidenced. See THE ENTRY.
+        // 0 = the configuration STATUS was measured on, and the only one whose
+        // placebo collapses. Mode 1 is available and documented; it is not the
+        // default, because it makes its money from the retrace filter rather
+        // than from the levels this study is about. See THE ENTRY.
         IN_ENTRY_MODE.Name = "Entry (0=market next bar, 1=limit pullback)";
-        IN_ENTRY_MODE.SetInt(1);
+        IN_ENTRY_MODE.SetInt(0);
         IN_LIM_OFF.Name   = "Limit Offset (x ATR)";        IN_LIM_OFF.SetFloat(0.15f);
         IN_LIM_BARS.Name  = "Limit Armed Bars";            IN_LIM_BARS.SetInt(3);
         return;
