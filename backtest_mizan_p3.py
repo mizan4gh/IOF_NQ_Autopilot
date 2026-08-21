@@ -99,6 +99,53 @@ RESULTS (2026-08-20, 6 frozen NQ contracts, 387 sessions, $20/pt, $5 RT)
   to the 83.0th / 19.5th / 18.0th percentile. The frozen levels are load-bearing,
   not decoration.
 
+POC-TOUCH ENTRY AND VOLUME BARS (2026-08-21)
+  "poc_now" is the A->M->POC rule without the distribution stage: profile the
+  accumulation, take the POC as the edge, wait for the manipulation, then rest a
+  limit AT value. It is the honest version of what "poc" was trying to be --
+  dropping D turns -$3,675 over 66 trades into +$73,370 over 204, which is one
+  more datapoint for the distribution stage being subtractive everywhere it has
+  been measured.
+
+  All six frozen NQ contracts, 387 sessions, $20/pt, $5 RT:
+
+    variant              bars      n      net    gate   null   placebo .10/.20
+    sweep      (market)   5m     253  +$62,730   5/6   99.0th   83.0 / 19.5  ok
+    sweep_limit           5m     222  +$75,340   5/6  100.0th  100.0 / 98.0  NO
+    sweep_limit_d         5m     105  +$91,795   6/6  100.0th  100.0 /100.0  NO
+    poc        (full)     5m      66   -$3,675   2/6   21.5th        --
+    poc_now               5m     204  +$73,370   5/6   99.5th   96.5 / 85.0  NO
+    sweep      (market) 2500v    229     -$855   4/6   77.0th        --
+    poc_now             2500v    176   +$6,490   4/6   98.5th  100.0 / 27.0  ok
+
+  Read the last two columns together and the picture is a clean trade-off with
+  no shippable corner:
+
+  * 2,500-contract bars DESTROY the base rule. +$62,730 -> -$855 and 99.0th ->
+    77.0th, i.e. straight into the noise. The POC entry is the only thing that
+    rescues it, to +$6,490 at the 98.5th -- but that is +$37 a trade, and the
+    null it beats has a MEAN of -$17,070, so the percentile is measuring "less
+    bad than a coinflip through a losing bracket", not a living edge. It does
+    survive 3 ticks of slip (+$3,850) and it is the ONLY variant here whose
+    placebo collapses (27.0th at the discriminating shift). Levels load-bearing,
+    money absent.
+  * On 5-minute bars poc_now is the mirror image: real money (+$73,370, 3t slip
+    +$65,075) and a placebo that does NOT collapse (96.5 / 85.0). Same disease
+    as sweep_limit -- what carries it is "price came back to a line", and any
+    line will do. NQZ25 is the 1/6 failure in both, -$12,260.
+  * Shift 0.10 is a weak placebo generally (the market rule scores 83.0 there
+    and still passes on 0.20). Judge on 0.20.
+
+  Gate rescaling, stated because it is not free: min_on_bars=60 is 5 HOURS at 5m
+  and roughly 25 HOURS at 2,500 contracts, so on volume bars it is a volume
+  demand, not a duration, and at 60 it rejects 85% of sessions. It was re-set to
+  10 (>=25,000 contracts overnight), which passes 87% pooled against 100% for
+  the 5-minute gate. The shortfall is almost entirely NQU26, a thin back-month
+  that clears only 54% at any threshold. pb_bars is live but saturated: 174 of
+  the 176 fills land on the FIRST bar after the sweep, because on volume bars
+  the POC is usually already within a bar of price -- so "enter on the POC
+  touch" is barely a filter there, which is part of why it adds so little.
+
   THE OPEN PROBLEM: it is NQ-only. Same rules, all thresholds already
   ATR-denominated, three instrument families tested and three failures:
 
@@ -260,7 +307,22 @@ class Params:
     #           percentile. RETAINED AS A FALSIFIED REFERENCE, not an option:
     #           the setups that come back to value are disproportionately the
     #           ones that failed. Do not run this expecting the numbers above.
-    entry_mode: str = "sweep"     # "sweep" | "sweep_limit" | "confirm" | "poc"
+    # "poc_now" A->M->POC. The sweep arms a resting limit at ON_POC directly,
+    #           with NO distribution stage: value is the target of the pullback
+    #           rather than something price must first leave. This is "find the
+    #           edge with the volume profile, see the manipulation, enter on the
+    #           POC touch". Managed from its own fill bar, unlike "poc".
+    # "sweep_limit_d" the D-requiring sweep_limit that 069d4e0 measured, kept
+    #           only so that number stays reproducible. See the D block.
+    entry_mode: str = "sweep"     # sweep | sweep_limit | sweep_limit_d
+    #                             # confirm | poc | poc_now
+    # ── bar construction ───────────────────────────────────────────────────
+    # 0 = BAR_MINUTES time bars. >0 = constant-volume bars of that many
+    # contracts. NOTE that min_on_bars, min_rth_bars, dist_bars and pb_bars are
+    # all BAR COUNTS: on a volume chart they stop being durations and become
+    # volume demands, so they have to be re-set from data rather than carried
+    # over. 60 overnight bars is 5 hours at 5m and ~25 hours at 2,500.
+    vol_bars: int = 0
     # sweep_limit: instead of a market order at the next open, rest a LIMIT
     # limit_off_atr x ATR back toward the sweep extreme, armed limit_bars bars.
     # Better price on the setups that come back; NO FILL on the ones that run.
@@ -472,7 +534,14 @@ def scan(bars: List[Bar], p: Params) -> Cands:
         invalid = a.l[m] if side > 0 else a.h[m]
 
         # ── D: a close clear of the frozen overnight POC ───────────────────
-        if p.entry_mode == "sweep":
+        # Only the modes named here skip it, and the list is explicit because
+        # the alternative bit once: "sweep_limit" was added without being added
+        # HERE, so it fell into the else-branch and quietly became an A->M->D
+        # rule whose entry loop then ignored d completely. The cpp implements
+        # A->M with no distribution stage, so the two were measuring different
+        # strategies while reporting one number. Use "sweep_limit_d" for the
+        # D-requiring variant that 069d4e0 actually measured.
+        if p.entry_mode in ("sweep", "sweep_limit", "poc_now"):
             d = m                        # stage skipped: the sweep IS the entry
         else:
             d = -1
@@ -489,7 +558,7 @@ def scan(bars: List[Bar], p: Params) -> Cands:
         # ── E: pullback to the frozen POC ──────────────────────────────────
         e, fill = -1, 0.0
         manage = -1
-        if p.entry_mode == "sweep_limit":
+        if p.entry_mode in ("sweep_limit", "sweep_limit_d"):
             lv = float(round_to_tick(a.c[m] - side * p.limit_off_atr * A))
             thru = p.require_through * TICK
             for j in range(m + 1, min(m + 1 + p.limit_bars, rth_end)):
@@ -521,7 +590,13 @@ def scan(bars: List[Bar], p: Params) -> Cands:
         if e < 0:
             continue
         if manage < 0:
-            manage = e if p.entry_mode in ("confirm", "sweep") else e + 1
+            # A limit fill is managed from its OWN bar: price reached the limit
+            # somewhere inside that bar and the rest of it can still reach the
+            # stop, so assuming otherwise deletes real adverse excursion. The
+            # legacy "poc" mode keeps e+1 only so its falsified number stays
+            # reproducible -- that convention is the generous one, and it is
+            # worth roughly $6k of fiction over a run this size.
+            manage = (e + 1) if p.entry_mode == "poc" else e
 
         raw = abs(fill - invalid) + p.stop_buf_atr * A
         sp = float(_rt(np.clip(raw, p.min_stop_atr * A,
@@ -633,9 +708,21 @@ def contracts_for(scope: str) -> Dict[str, Path]:
     return dict(NQ_FROZEN)
 
 
+def load_bars(tag: str, scid: Path, p: Params):
+    """Time bars, or constant-volume bars, per p.vol_bars.
+
+    backtest_mizan_null.py looks for exactly this name. Loading bars any other
+    way there once null-tested 5-minute bars against a volume-bar result.
+    """
+    if p.vol_bars > 0:
+        from backtest_sweepabs_propeval import load_volume_bars_cached
+        return load_volume_bars_cached(tag, scid, p.vol_bars)[0]
+    return load_bars_cached(tag, scid, BAR_MINUTES)
+
+
 def run_one(tag: str, scid: Path, p: Params, write: bool = True) -> dict:
     p = apply_spec(p, tag)
-    bars = load_bars_cached(tag, scid, BAR_MINUTES)
+    bars = load_bars(tag, scid, p)
     c = scan(bars, p)
     r = simulate(bars, c, p)
     if write:
@@ -668,12 +755,20 @@ def main():
              "confirm": "next open after the distribution close [63.5th pctile]",
              "poc": f"limit at ON_POC{p.poc_tol_atr:+.2f}xATR, armed "
                     f"{p.pb_bars} bars [FALSIFIED, 21.5th pctile]",
+             "poc_now": f"limit at ON_POC{p.poc_tol_atr:+.2f}xATR, armed "
+                        f"{p.pb_bars} bars, NO distribution stage",
+             "sweep_limit": f"limit {p.limit_off_atr:+.2f}xATR back toward the "
+                            f"sweep, armed {p.limit_bars} bars",
+             "sweep_limit_d": f"as sweep_limit but the D stage is REQUIRED "
+                              f"[what 069d4e0 measured]",
              }.get(p.entry_mode, p.entry_mode)
+    barsrc = f"{p.vol_bars}-contract volume bars" if p.vol_bars else f"{BAR_MINUTES}m"
     print("Mizan_IOF_NQ_P3 -- daily power-of-three on FROZEN levels "
-          f"({BAR_MINUTES}m)")
+          f"({barsrc})")
     print(f"  A: overnight 18:00-09:29 (>={p.min_on_bars} bars) -> frozen "
           f"{lv} + ON_POC + ATR")
-    dist = ("D: SKIPPED" if p.entry_mode == "sweep" else
+    dist = ("D: SKIPPED"
+            if p.entry_mode in ("sweep", "sweep_limit", "poc_now") else
             f"D: close {p.dist_min_atr}xATR clear of ON_POC within "
             f"{p.dist_bars} bars")
     print(f"  M: sweep a frozen level by >{p.sweep_eps_atr}xATR and reclaim, "

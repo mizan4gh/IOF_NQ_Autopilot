@@ -71,33 +71,41 @@
 //
 //  Entry Mode 0 restores the market order at the next bar's open. READ THIS
 //  BEFORE CHOOSING: mode 0 is the configuration every number in STATUS below
-//  was measured on. Mode 1 looks better on every headline and is worse where
-//  it counts. Re-run on the 6 frozen NQ contracts, 387 sessions, 2026-08-21:
+//  was measured on. Mode 1 makes more money and is worse where it counts.
+//  Both columns re-run on the 6 frozen NQ contracts, 387 sessions, 2026-08-21:
 //
 //                          mode 0 MARKET       mode 1 LIMIT
-//      trades              253 (0.65/day)      105 (0.27/day)
-//      pooled net             +$62,730            +$91,795
-//      ship gate               5/6 FAIL            6/6 PASS
+//      trades              253 (0.65/day)      222 (0.57/day)
+//      pooled net             +$62,730            +$75,340
+//      ship gate               5/6 FAIL            5/6 FAIL
 //      re-sign null              99.0th             100.0th
 //      PLACEBO shift 0.10        83.0th             100.0th
-//      PLACEBO shift 0.20        19.5th             100.0th
+//      PLACEBO shift 0.20        19.5th              98.0th
 //
-//  The last two rows are the whole story. Pull every frozen level inward by a
-//  fraction of the overnight range — keep the sweep mechanic, destroy the
-//  level's structural meaning — and the market rule collapses to noise, which
-//  is what a real level effect is supposed to do. The limit rule does not
-//  collapse. It scores at the ceiling whether the levels mean anything or not,
-//  because what is carrying it is no longer the level: it is the retrace
-//  filter. A setup that never comes back 0.15 x ATR simply never gets entered,
-//  and per the measurement in 069d4e0 that unfilled half is the losing half —
-//  the price improvement on the filled half is about $16 a trade, i.e. nothing.
+//  (An earlier revision of this header quoted 105 trades / +$91,795 / 6/6 for
+//  mode 1. Those belong to a DIFFERENT rule. backtest_mizan_p3.py's
+//  "sweep_limit" was never added to the list of modes that skip the
+//  distribution stage, so it silently required a close 0.5 x ATR clear of the
+//  overnight POC before arming the limit — a stage this file does not
+//  implement and never did. That mode is now "sweep_limit_d" and still
+//  reproduces 105 / +$91,795; "sweep_limit" is what runs here.)
 //
-//  So mode 1's extra $29k is a filter wearing a fill's clothing. It may well be
-//  a real filter — the order fills or it does not, there is no hindsight in it
-//  — but it is a DIFFERENT claim from the one this file's levels make, it has
-//  not been tested as one, and it is bought by throwing away 59% of the sample.
-//  At 0.27 trades/day the uncorrelated instruments are left with ~20 trades,
-//  which cannot validate anything.
+//  The last two rows are the whole story, and the correction sharpens them.
+//  Pull every frozen level inward by a fraction of the overnight range — keep
+//  the sweep mechanic, destroy the level's claim to be a structural price —
+//  and the market rule collapses to noise at the 19.5th, which is what a real
+//  level effect is supposed to do. The limit rule does not collapse. It scores
+//  at the ceiling whether the levels mean anything or not, and it does so at
+//  222 trades against the market rule's 253, so this can no longer be waved off
+//  as a small-sample artifact. What carries mode 1 is the retrace filter, not
+//  the level: a setup that never comes back 0.15 x ATR is never entered, and
+//  per 069d4e0 that unfilled group is the losing group. Price improvement on
+//  the fills is about $16 a trade, i.e. nothing.
+//
+//  So mode 1's extra $12,610 is a filter wearing a fill's clothing. It may well
+//  be a real filter — the order fills or it does not, there is no hindsight in
+//  it — but it is a DIFFERENT claim from the one this file's levels make, and
+//  it has never been tested as one.
 //
 //  One setup per session is consumed by the SWEEP, not by the fill: a limit
 //  that expires unfilled does not free the day for a second sweep. That is what
