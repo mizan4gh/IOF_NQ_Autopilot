@@ -99,16 +99,63 @@ RESULTS (2026-08-20, 6 frozen NQ contracts, 387 sessions, $20/pt, $5 RT)
   to the 83.0th / 19.5th / 18.0th percentile. The frozen levels are load-bearing,
   not decoration.
 
-  THE OPEN PROBLEM: it does not port to ES. Same rules, all thresholds already
-  ATR-denominated, $50/pt: -$392 over 276 trades, 41.5th percentile, 3/6. ES and
-  NQ are 0.954 correlated on daily returns, so ES was only ever a portability
-  check and never independent evidence -- but a genuine liquidity-structure
-  effect ought to show up in both, and it does not. Resolve that before any cpp.
+  THE OPEN PROBLEM: it is NQ-only. Same rules, all thresholds already
+  ATR-denominated, three instrument families tested and three failures:
+
+    ES  ($50/pt)   -$392 over 276 trades   41.5th pctile   3/6
+    CL  (--cl)   -$2,880 over  64 trades   37.5th pctile   0/1
+                 -$7,160 at crude's own 09:00 pit open, 29.5th
+    GC  (--gc)   +$1,045 over  51 trades   66.0th pctile   1/2
+                 +$3,453 at gold's own 08:20 open, 80.0th, 2/2
+
+  ES and NQ are 0.954 correlated on daily returns, so ES was only ever a
+  portability check; CL and GC are the genuinely uncorrelated tests. Crude is
+  actively negative rather than merely absent. Both are thin back-month
+  contracts (~120 bars/day against NQ's ~273, and only 31-35% of their sessions
+  clear the data gates against 76-80%), so n is 51-68 and gold in particular is
+  underpowered -- but a real liquidity-structure effect ought to show up
+  somewhere other than one index, and it does not.
+
+DAILY LOSS CAP -- DO NOT TURN IT ON HERE
+  DAILY_LOSS defaults to 0 because switching it on is not a free safety upgrade
+  for THIS strategy, it is a 48% tax:
+
+    cap        n     net      worst MaxDD   worst day   cap fires
+    off      253  +$62,730      -$14,215     -$4,030        0
+    $800     253  +$32,765      -$14,470     -$2,300       50
+    $1,600   253  +$49,170      -$15,820     -$2,470        6
+
+  Half the P/L gone and the drawdown NOT improved -- MaxDD is marginally worse.
+  Only the worst single day gets better. That combination is the signature of
+  cutting winners rather than cutting losses, and the damage is monotone in how
+  tight the cap is.
+
+  The cause is structural and will not tune away. This strategy takes ONE setup
+  per session, so a daily cap can never do the thing a daily cap is for -- stop
+  the second and third bad trade of the day. All it can do is truncate the only
+  trade there is, including trades that dip past the cap intrabar and then
+  recover to target. And it truncates most of them: median risk per trade is
+  $905 at $20/pt and 59% of trades risk more than $800, so an $800 cap sits
+  BELOW the median stop and front-runs it.
+
+  The practical consequence: with the cap off, the worst day is -$4,030, which
+  fails an $800-daily-limit account outright. So this strategy cannot be run
+  under an $800 regime at NQ size in either state -- capped it loses half its
+  edge, uncapped it breaches. The fix is to shrink the risk unit rather than
+  the cap: in MNQ dollars that $905 median becomes ~$90 and the cap stops
+  binding. UNTESTED as of 2026-08-21.
+
+  (The same cap on backtest_mizan_avpmd.py is a genuine trade rather than a
+  giveaway -- -21% net for -18% MaxDD and a 65% better worst day, gate holding
+  6/6 -- because that strategy takes ~2.2 trades/day, so the cap can actually
+  halt a day. The difference is trades per day, not the cap.)
 
 Usage
   python backtest_mizan_p3.py --nq                      # the sweep default
   python backtest_mizan_null.py 200 --nq --p3           # its re-sign null
   MZ3_PLACEBO_SHIFT=0.2 python backtest_mizan_p3.py --nq
+  python backtest_mizan_p3.py --cl                      # the uncorrelated tests
+  python backtest_mizan_p3.py --freeze                  # copy CL/GC in first
   MZ3_ENTRY_MODE=poc python backtest_mizan_p3.py --nq   # the falsified chain
 """
 from __future__ import annotations
