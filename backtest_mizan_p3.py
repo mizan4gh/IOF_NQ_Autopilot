@@ -327,8 +327,33 @@ GC_FROZEN = {                                              # miNY gold
     "QOQ5": BASE / "FROZEN_QOQ5.COMEX.scid",               # 2025-02 -> 2025-07
     "QOG6": BASE / "FROZEN_QOG6.COMEX.scid",               # 2025-08 -> 2026-01
 }
+# RTY is NOT an independence test -- Russell is a US equity index and moves with
+# the Nasdaq. It is a DIAGNOSTIC: if the rule works on RTY but not ES, the
+# "equity index liquidity structure" story survives and ES needs explaining; if
+# it fails on RTY too, the effect is specific to the Nasdaq contract rather than
+# to index futures, which is a much smaller claim.
+RTY_FROZEN = {                                             # E-mini Russell 2000
+    "RTYH6": BASE / "FROZEN_RTYH6.CME.scid",
+    "RTYM6": BASE / "FROZEN_RTYM6.CME.scid",
+    "RTYU6": BASE / "FROZEN_RTYU6.CME.scid",
+}
+# 6E is the real breadth test: FX, uncorrelated with equity indices. Caveat
+# BEFORE reading its result -- the rule's premise is that the 09:30 ET equity
+# open manipulates an overnight range, and 09:30 is not structurally special
+# for EUR/USD. Test it at 09:30 for comparability AND at its own 03:00 London
+# handover (MZ3_RTH_OPEN=300), the way CL got its 09:00 pit open and GC its
+# 08:20; a failure at 09:30 alone does not settle anything.
+FX_FROZEN = {                                              # Euro FX
+    "6EH6": BASE / "FROZEN_6EH6.CME.scid",
+    "6EM6": BASE / "FROZEN_6EM6.CME.scid",
+    "6EU6": BASE / "FROZEN_6EU6.CME.scid",
+}
 _FREEZE_SRC = {"CLG3": "CLG3.NYMEX.scid", "QOQ5": "QOQ5.COMEX.scid",
-               "QOG6": "QOG6.COMEX.scid"}
+               "QOG6": "QOG6.COMEX.scid",
+               "RTYH6": "RTYH6.CME.scid", "RTYM6": "RTYM6.CME.scid",
+               "RTYU6": "RTYU6.CME.scid",
+               "6EH6": "6EH6.CME.scid", "6EM6": "6EM6.CME.scid",
+               "6EU6": "6EU6.CME.scid"}
 
 # Per-instrument contract specs. pt_val scales every dollar figure linearly and
 # therefore cannot move a null percentile or a net>0 count -- only the
@@ -340,6 +365,13 @@ SPECS = {
     "ES": dict(tick=0.25, pt_val=50.0,   commission=5.00, bin_pts=1.0),
     "CL": dict(tick=0.01, pt_val=1000.0, commission=5.00, bin_pts=0.05),
     "GC": dict(tick=0.10, pt_val=50.0,   commission=5.00, bin_pts=1.0),
+    # RTY: 0.10 tick worth $5.00 -> $50 a point, same as ES.
+    "RTY": dict(tick=0.10, pt_val=50.0,  commission=5.00, bin_pts=0.10),
+    # 6E: 125,000 EUR, 0.00005 tick worth $6.25 -> $125,000 per 1.00 of price.
+    # bin_pts has to follow the tick or the whole overnight profile lands in
+    # one bin and the POC becomes meaningless.
+    "6E": dict(tick=0.00005, pt_val=125000.0, commission=5.00,
+               bin_pts=0.0005),
 }
 
 
@@ -759,6 +791,8 @@ def run_engine(bars: List[Bar], p: Optional[Params] = None,
 
 
 def instrument_of(tag: str) -> str:
+    if tag in RTY_FROZEN: return "RTY"
+    if tag in FX_FROZEN:  return "6E"
     if tag in CL_FROZEN:  return "CL"
     if tag in GC_FROZEN:  return "GC"
     if tag in ES_FROZEN:  return "ES"
@@ -787,7 +821,7 @@ def freeze(tags=None) -> None:
     for tag, src in _FREEZE_SRC.items():
         if tags and tag not in tags:
             continue
-        dst = {**CL_FROZEN, **GC_FROZEN}[tag]
+        dst = {**CL_FROZEN, **GC_FROZEN, **RTY_FROZEN, **FX_FROZEN}[tag]
         s = SC_DATA / src
         if not s.exists():
             print(f"  {tag:6s} MISSING {s}")
@@ -802,7 +836,8 @@ def freeze(tags=None) -> None:
 
 def contracts_for(scope: str) -> Dict[str, Path]:
     env = os.environ.get("MZ3_TAGS")
-    everything = {**NQ_FROZEN, **MNQ, **ES_FROZEN, **CL_FROZEN, **GC_FROZEN}
+    everything = {**NQ_FROZEN, **MNQ, **ES_FROZEN, **CL_FROZEN, **GC_FROZEN,
+                  **RTY_FROZEN, **FX_FROZEN}
     if env:
         return {t: everything[t] for t in env.split(",") if t in everything}
     if scope == "--mnq":
@@ -813,8 +848,12 @@ def contracts_for(scope: str) -> Dict[str, Path]:
         return dict(CL_FROZEN)
     if scope == "--gc":
         return dict(GC_FROZEN)
+    if scope == "--rty":
+        return dict(RTY_FROZEN)
+    if scope == "--6e":
+        return dict(FX_FROZEN)
     if scope == "--uncorr":
-        return {**CL_FROZEN, **GC_FROZEN}
+        return {**CL_FROZEN, **GC_FROZEN, **FX_FROZEN}
     if scope == "--is":
         return {t: everything[t] for t in IS_TAGS}
     if scope == "--oos":
