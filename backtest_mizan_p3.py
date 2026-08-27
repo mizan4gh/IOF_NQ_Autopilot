@@ -163,6 +163,47 @@ POC-TOUCH ENTRY AND VOLUME BARS (2026-08-21)
   underpowered -- but a real liquidity-structure effect ought to show up
   somewhere other than one index, and it does not.
 
+SWEEP-EXCURSION STOP ANCHOR -- FALSIFIED (2026-08-26)
+  Motivated by a live NQU6 stop: the 09:45 sweep bar's high was 29314.25, the
+  stop went at 29320.00, and the excursion ran on to 29332.75 two bars later --
+  stopped by 12.75 points, then price ran 116 points to the target it never got
+  to keep. The proposed fix was to stop measuring the invalidation from the
+  RECLAIM bar and measure it from the whole sweep excursion instead: walk back
+  from the signal bar while price is still beyond the level and take the
+  furthest point of that contiguous run. Causal -- it reads no bar after the
+  signal -- and parameter-free. It is stop_anchor="excursion".
+
+  Note first that it could NOT have saved the trade that motivated it. The ONH
+  was first exceeded on the 09:40 bar (29311.00), so the excursion-so-far high
+  at order time is still 29314.25: the 12.75 points of overshoot happened
+  strictly in the FUTURE of the order. Any rule that fixes that trade is
+  look-ahead. That should have been checked before the run and was not.
+
+  It is reachable -- 58 of 253 candidates change, median +12.00pt, mean
+  +17.56pt -- and it is worse. Six frozen NQ contracts, $20/pt, $5 RT:
+
+    stop_anchor   n     pooled net    gate   MaxDD vs baseline
+    bar         253      +$62,730     5/6    --
+    excursion   253      +$52,245     5/6    worse 5/6, tied 1/6
+
+  Paired on the 59 trades that change: mean -$178/trade, se $172, t=-1.04.
+  24 better / 35 worse, 3/6 contracts better. Not significant on its own --
+  it is well inside this harness's noise floor -- but every secondary reading
+  carries the same sign, and none carries the other one.
+
+  The mechanism is visible in the exit flips: STOP->TARGET 2, TARGET->STOP 3,
+  STOP->STOP 32 (the same losers, for more money each). With target_mode="r"
+  a wider stop drags the target out with it, so widening pays more on the
+  losers AND demands more of the winners. That confound was isolated by
+  re-running with target_mode="level", which prices the target off the far-side
+  frozen level instead of off the stop: +$41,430 -> +$33,935, still -$7,495.
+  So the confound is not the cause. The wider stop is simply worse.
+
+  This is the third time a wider/later stop has been rejected in this repo
+  (M4 stop-overshoot, M4 delayed/retest entry). The reclaim bar's own extreme
+  IS the invalidation. The knob is kept, defaulted to "bar", so the result
+  stays reproducible -- do not re-run it.
+
 DAILY LOSS CAP -- DO NOT TURN IT ON HERE
   DAILY_LOSS defaults to 0 because switching it on is not a free safety upgrade
   for THIS strategy, it is a 48% tax:
@@ -338,6 +379,15 @@ class Params:
     stop_buf_atr: float = 0.15
     min_stop_atr: float = 0.40
     max_stop_atr: float = 2.50
+    # What the stop is measured FROM.
+    #   "bar"        the signal bar's own extreme -- what the cpp ships.
+    #   "excursion"  the extreme of the WHOLE sweep excursion: walk back from
+    #                the signal bar while price is still beyond the level and
+    #                take the furthest point of that contiguous run. A sweep
+    #                that spends three bars poking through a level has an
+    #                invalidation further out than its reclaim bar admits.
+    # Only bars at or BEFORE the signal bar are read, so this stays causal.
+    stop_anchor: str = "bar"
     target_mode: str = "r"        # "r" | "level"
     target_r: float = 2.0
     min_level_tgt_r: float = 1.0  # a level nearer than this is not a target
@@ -531,7 +581,15 @@ def scan(bars: List[Bar], p: Params) -> Cands:
                 break
         if m < 0:
             continue
-        invalid = a.l[m] if side > 0 else a.h[m]
+        if p.stop_anchor == "excursion":
+            j0 = m
+            while j0 > on_end and ((a.l[j0 - 1] < lvl) if side > 0
+                                   else (a.h[j0 - 1] > lvl)):
+                j0 -= 1
+            invalid = (float(a.l[j0:m + 1].min()) if side > 0
+                       else float(a.h[j0:m + 1].max()))
+        else:
+            invalid = a.l[m] if side > 0 else a.h[m]
 
         # ── D: a close clear of the frozen overnight POC ───────────────────
         # Only the modes named here skip it, and the list is explicit because
