@@ -163,6 +163,48 @@ POC-TOUCH ENTRY AND VOLUME BARS (2026-08-21)
   underpowered -- but a real liquidity-structure effect ought to show up
   somewhere other than one index, and it does not.
 
+ONE SETUP PER DAY -- VALIDATED, NOT JUST ASSUMED (2026-08-26)
+  The cpp locks the session on the first qualifying sweep (SetupTaken), and
+  across the six contracts that lock DISCARDS 671 further qualifying sweeps
+  against the 253 it takes. That is 2.7 signals thrown away per signal traded,
+  which is a large enough number to be worth checking rather than assuming.
+  max_setups_day exists to check it. It does not allow concurrent positions:
+  simulate() is one-position-at-a-time and skips any candidate whose entry
+  precedes the open trade's exit, so N means "up to N NON-OVERLAPPING trades".
+
+    max_setups_day    n    /day    pooled net    gate
+    1 (shipped)     253    0.65      +$62,730    5/6
+    2               370    0.96      +$48,560    5/6
+    3               455    1.18      +$65,025    5/6
+    unlimited       593    1.53      +$42,470    5/6
+
+  The gate never moves and the pooled net wanders NON-MONOTONICALLY --
+  62.7k, 48.6k, 65.0k, 42.5k. A real effect does not do that; noise does.
+
+  Bucketing the unlimited run by each trade's ordinal within its own session
+  is what settles it, because the candidate sets are nested and the buckets
+  are therefore genuine marginals:
+
+    ordinal     n      net    $/trade    t      WR
+    1st       253  +$62,730     +$248  +2.47   40.7%
+    2nd       172  -$16,755      -$97  -0.94   32.6%
+    3rd        99   -$5,490      -$55  -0.42   30.3%
+    4th+       69   +$1,985      +$29  +0.18   34.8%
+
+    1st of day        253  +$62,730  +$248/t  t=+2.47
+    every later one   340  -$20,260   -$60/t  t=-0.82
+
+  So the day-lock is not throwing away value, it is throwing away a LOSING
+  subset. The first sweep of the session carries the entire edge -- it is the
+  only cell measured anywhere in this file with t > 2 -- and every sweep after
+  it is a small negative. The win rate falls 40.7% -> 32.6% -> 30.3% and stays
+  down, which is a coherent structural gradient rather than a P/L wobble.
+
+  KEEP max_setups_day=1. The knob stays, defaulted to the shipped rule, so the
+  result is reproducible; do not re-run it. Note this is a verdict about the
+  LOCK, not new evidence for the strategy: the 1st-of-day bucket IS the
+  baseline's own 253 trades, which still fail the six-contract gate at 5/6.
+
 SWEEP-EXCURSION STOP ANCHOR -- FALSIFIED (2026-08-26)
   Motivated by a live NQU6 stop: the 09:45 sweep bar's high was 29314.25, the
   stop went at 29320.00, and the excursion ran on to 29332.75 two bars later --
@@ -391,6 +433,11 @@ class Params:
     target_mode: str = "r"        # "r" | "level"
     target_r: float = 2.0
     min_level_tgt_r: float = 1.0  # a level nearer than this is not a target
+    # How many qualifying sweeps a single session may take. 1 is the shipped
+    # rule (SetupTaken locks the day in the cpp). 0 = unlimited. Raising it
+    # does NOT allow concurrent positions: simulate() runs one at a time and
+    # skips any candidate whose entry precedes the open trade's exit.
+    max_setups_day: int = 1
     max_hold_bars: int = 0        # 0 = hold to the 15:55 flatten
     atr_len: int = 14
     # ── contract spec ──────────────────────────────────────────────────────
@@ -565,112 +612,123 @@ def scan(bars: List[Bar], p: Params) -> Cands:
             downs = [L + sh for L in downs]
             ups = [L - sh for L in ups]
 
-        # ── M: first frozen-level sweep-and-reclaim of the day ─────────────
+        # ── M: frozen-level sweep-and-reclaim ──────────────────────────────
+        # max_setups_day=1 is the shipped rule: the SWEEP consumes the day, and
+        # a limit that expires unfilled does NOT re-open it. >1 collects the
+        # next qualifying sweeps too; simulate() is one-position-at-a-time and
+        # skips any whose entry lands before the open trade exits, so this is
+        # "up to N NON-OVERLAPPING trades a day", not N concurrent positions.
         eps = p.sweep_eps_atr * A
-        m, side, lvl = -1, 0, 0.0
+        cap = p.max_setups_day if p.max_setups_day > 0 else 10 ** 9
+        sweeps = []
         for j in range(on_end, rth_end):
             if a.hhmm[j] > p.manip_end:
                 break
             hit_dn = [L for L in downs if a.l[j] < L - eps and a.c[j] > L]
             if hit_dn and cpos[j] >= p.sweep_close_pos:
-                m, side, lvl = j, 1, max(hit_dn)
+                sweeps.append((j, 1, max(hit_dn)))
+            else:
+                hit_up = [L for L in ups if a.h[j] > L + eps and a.c[j] < L]
+                if hit_up and (1.0 - cpos[j]) >= p.sweep_close_pos:
+                    sweeps.append((j, -1, min(hit_up)))
+            if len(sweeps) >= cap:
                 break
-            hit_up = [L for L in ups if a.h[j] > L + eps and a.c[j] < L]
-            if hit_up and (1.0 - cpos[j]) >= p.sweep_close_pos:
-                m, side, lvl = j, -1, min(hit_up)
-                break
-        if m < 0:
+        if not sweeps:
             continue
-        if p.stop_anchor == "excursion":
-            j0 = m
-            while j0 > on_end and ((a.l[j0 - 1] < lvl) if side > 0
-                                   else (a.h[j0 - 1] > lvl)):
-                j0 -= 1
-            invalid = (float(a.l[j0:m + 1].min()) if side > 0
-                       else float(a.h[j0:m + 1].max()))
-        else:
-            invalid = a.l[m] if side > 0 else a.h[m]
 
-        # ── D: a close clear of the frozen overnight POC ───────────────────
-        # Only the modes named here skip it, and the list is explicit because
-        # the alternative bit once: "sweep_limit" was added without being added
-        # HERE, so it fell into the else-branch and quietly became an A->M->D
-        # rule whose entry loop then ignored d completely. The cpp implements
-        # A->M with no distribution stage, so the two were measuring different
-        # strategies while reporting one number. Use "sweep_limit_d" for the
-        # D-requiring variant that 069d4e0 actually measured.
-        if p.entry_mode in ("sweep", "sweep_limit", "poc_now"):
-            d = m                        # stage skipped: the sweep IS the entry
-        else:
-            d = -1
-            lim_c = poc + side * p.dist_min_atr * A
-            for j in range(m + 1, min(m + 1 + p.dist_bars, rth_end)):
-                if (a.c[j] < invalid) if side > 0 else (a.c[j] > invalid):
-                    break
-                if (a.c[j] > lim_c) if side > 0 else (a.c[j] < lim_c):
-                    d = j
-                    break
-            if d < 0:
+        # Each setup is independent from here down; `continue` skips THIS
+        # setup, not the session.
+        for (m, side, lvl) in sweeps:
+            if p.stop_anchor == "excursion":
+                j0 = m
+                while j0 > on_end and ((a.l[j0 - 1] < lvl) if side > 0
+                                       else (a.h[j0 - 1] > lvl)):
+                    j0 -= 1
+                invalid = (float(a.l[j0:m + 1].min()) if side > 0
+                           else float(a.h[j0:m + 1].max()))
+            else:
+                invalid = a.l[m] if side > 0 else a.h[m]
+
+            # ── D: a close clear of the frozen overnight POC ───────────────────
+            # Only the modes named here skip it, and the list is explicit because
+            # the alternative bit once: "sweep_limit" was added without being added
+            # HERE, so it fell into the else-branch and quietly became an A->M->D
+            # rule whose entry loop then ignored d completely. The cpp implements
+            # A->M with no distribution stage, so the two were measuring different
+            # strategies while reporting one number. Use "sweep_limit_d" for the
+            # D-requiring variant that 069d4e0 actually measured.
+            if p.entry_mode in ("sweep", "sweep_limit", "poc_now"):
+                d = m                        # stage skipped: the sweep IS the entry
+            else:
+                d = -1
+                lim_c = poc + side * p.dist_min_atr * A
+                for j in range(m + 1, min(m + 1 + p.dist_bars, rth_end)):
+                    if (a.c[j] < invalid) if side > 0 else (a.c[j] > invalid):
+                        break
+                    if (a.c[j] > lim_c) if side > 0 else (a.c[j] < lim_c):
+                        d = j
+                        break
+                if d < 0:
+                    continue
+
+            # ── E: pullback to the frozen POC ──────────────────────────────────
+            e, fill = -1, 0.0
+            manage = -1
+            if p.entry_mode in ("sweep_limit", "sweep_limit_d"):
+                lv = float(round_to_tick(a.c[m] - side * p.limit_off_atr * A))
+                thru = p.require_through * TICK
+                for j in range(m + 1, min(m + 1 + p.limit_bars, rth_end)):
+                    if a.hhmm[j] > p.session_end:
+                        break
+                    if (a.c[j] < invalid) if side > 0 else (a.c[j] > invalid):
+                        break
+                    if ((a.l[j] <= lv - thru) if side > 0 else (a.h[j] >= lv + thru)):
+                        e = j
+                        fill = min(a.o[j], lv) if side > 0 else max(a.o[j], lv)
+                        manage = j          # limit fill -> conservative, own bar
+                        break
+            elif p.entry_mode in ("confirm", "sweep"):
+                j = d + 1
+                if j < rth_end and a.hhmm[j] <= p.session_end:
+                    e, fill = j, float(a.o[j])
+            else:
+                lv = float(_rt(poc + side * p.poc_tol_atr * A, p.tick))
+                thru = p.require_through * p.tick
+                for j in range(d + 1, min(d + 1 + p.pb_bars, rth_end)):
+                    if a.hhmm[j] > p.session_end:
+                        break
+                    if (a.c[j] < invalid) if side > 0 else (a.c[j] > invalid):
+                        break
+                    if ((a.l[j] <= lv - thru) if side > 0 else (a.h[j] >= lv + thru)):
+                        e = j
+                        fill = min(a.o[j], lv) if side > 0 else max(a.o[j], lv)
+                        break
+            if e < 0:
+                continue
+            if manage < 0:
+                # A limit fill is managed from its OWN bar: price reached the limit
+                # somewhere inside that bar and the rest of it can still reach the
+                # stop, so assuming otherwise deletes real adverse excursion. The
+                # legacy "poc" mode keeps e+1 only so its falsified number stays
+                # reproducible -- that convention is the generous one, and it is
+                # worth roughly $6k of fiction over a run this size.
+                manage = (e + 1) if p.entry_mode == "poc" else e
+
+            raw = abs(fill - invalid) + p.stop_buf_atr * A
+            sp = float(_rt(np.clip(raw, p.min_stop_atr * A,
+                                   p.max_stop_atr * A), p.tick))
+            if sp <= 0.0:
                 continue
 
-        # ── E: pullback to the frozen POC ──────────────────────────────────
-        e, fill = -1, 0.0
-        manage = -1
-        if p.entry_mode in ("sweep_limit", "sweep_limit_d"):
-            lv = float(round_to_tick(a.c[m] - side * p.limit_off_atr * A))
-            thru = p.require_through * TICK
-            for j in range(m + 1, min(m + 1 + p.limit_bars, rth_end)):
-                if a.hhmm[j] > p.session_end:
-                    break
-                if (a.c[j] < invalid) if side > 0 else (a.c[j] > invalid):
-                    break
-                if ((a.l[j] <= lv - thru) if side > 0 else (a.h[j] >= lv + thru)):
-                    e = j
-                    fill = min(a.o[j], lv) if side > 0 else max(a.o[j], lv)
-                    manage = j          # limit fill -> conservative, own bar
-                    break
-        elif p.entry_mode in ("confirm", "sweep"):
-            j = d + 1
-            if j < rth_end and a.hhmm[j] <= p.session_end:
-                e, fill = j, float(a.o[j])
-        else:
-            lv = float(_rt(poc + side * p.poc_tol_atr * A, p.tick))
-            thru = p.require_through * p.tick
-            for j in range(d + 1, min(d + 1 + p.pb_bars, rth_end)):
-                if a.hhmm[j] > p.session_end:
-                    break
-                if (a.c[j] < invalid) if side > 0 else (a.c[j] > invalid):
-                    break
-                if ((a.l[j] <= lv - thru) if side > 0 else (a.h[j] >= lv + thru)):
-                    e = j
-                    fill = min(a.o[j], lv) if side > 0 else max(a.o[j], lv)
-                    break
-        if e < 0:
-            continue
-        if manage < 0:
-            # A limit fill is managed from its OWN bar: price reached the limit
-            # somewhere inside that bar and the rest of it can still reach the
-            # stop, so assuming otherwise deletes real adverse excursion. The
-            # legacy "poc" mode keeps e+1 only so its falsified number stays
-            # reproducible -- that convention is the generous one, and it is
-            # worth roughly $6k of fiction over a run this size.
-            manage = (e + 1) if p.entry_mode == "poc" else e
-
-        raw = abs(fill - invalid) + p.stop_buf_atr * A
-        sp = float(_rt(np.clip(raw, p.min_stop_atr * A,
-                               p.max_stop_atr * A), p.tick))
-        if sp <= 0.0:
-            continue
-
-        tgt = sp * p.target_r
-        if p.target_mode == "level":
-            # the far-side frozen liquidity is what the distribution leg aims at
-            far = [L for L in (ups if side > 0 else downs)
-                   if (L - fill) * side >= p.min_level_tgt_r * sp]
-            if far:
-                tgt = abs((min(far) if side > 0 else max(far)) - fill)
-        out.append((e, side, float(fill), sp, float(_rt(tgt, p.tick)), A, poc,
-                    onh - onl, m, e - m, manage))
+            tgt = sp * p.target_r
+            if p.target_mode == "level":
+                # the far-side frozen liquidity is what the distribution leg aims at
+                far = [L for L in (ups if side > 0 else downs)
+                       if (L - fill) * side >= p.min_level_tgt_r * sp]
+                if far:
+                    tgt = abs((min(far) if side > 0 else max(far)) - fill)
+            out.append((e, side, float(fill), sp, float(_rt(tgt, p.tick)), A, poc,
+                        onh - onl, m, e - m, manage))
 
     if not out:
         c = _empty()
