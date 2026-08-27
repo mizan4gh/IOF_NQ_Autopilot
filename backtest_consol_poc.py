@@ -37,8 +37,9 @@ THE WINDOW -- consol_mode
               threshold is a knob, and a knob is a place to overfit. Both modes
               are measured; neither is privileged.
 
-  ATR is frozen on the last bar before 09:30 and every threshold in the file is
-  an ATR multiple. The index ran 20k -> 30k across these six contracts and a
+  ATR is Wilders(14) -- atr_wilders(), which is what sc.ATR(MOVAVGTYPE_WILDERS)
+  computes in the live cpp -- frozen on the last bar before 09:30. Every
+  threshold in the file is an ATR multiple. The index ran 20k -> 30k across these six contracts and a
   points-denominated gate silently selects a biased subsample when it does.
 
 THE PLACEBO -- run it before believing any number below
@@ -61,37 +62,45 @@ RESULTS (2026-08-26, 6 frozen NQ contracts, 387 sessions, $20/pt, $5 RT)
   NO SHIP. There is no edge here to placebo-test in the first place.
 
     config                        n      net    $/trade    t    gate
-    clock     POC=volume        116  +$17,350    +$150   +0.87   3/6
-    clock     POC=mid    [plac] 105  +$11,985    +$114   +0.58   4/6
-    clock     shift 0.20 [plac]  66   +$3,055     +$46   +0.24   3/6
-    compress  POC=volume        110  +$13,770    +$125   +0.92   3/6
-    compress  POC=mid    [plac] 107   +$1,725     +$16   +0.13   2/6
-    compress  shift 0.20 [plac]  83   +$6,420     +$77   +0.68   3/6
+    clock     POC=volume        116  +$10,530     +$91   +0.55   3/6
+    clock     POC=mid    [plac] 104   +$7,470     +$72   +0.39   4/6
+    clock     shift 0.20 [plac]  66   +$2,400     +$36   +0.20   3/6
+    compress  POC=volume        110   +$1,330     +$12   +0.12   3/6
+    compress  POC=mid    [plac] 109  -$12,645    -$116   -1.23   2/6
+    compress  shift 0.20 [plac]  82     +$600      +$7   +0.08   3/6
 
-  Read the t column first. +0.87 and +0.92 are noise -- this harness's se is
-  ~$110-170 a trade at these sample sizes, so a pooled +$17,350 over 116 trades
-  is not distinguishable from zero. Nothing downstream of that matters, which
-  is why no null test was run: there is no positive result to null.
+  Read the t column first. +0.55 and +0.12 are noise -- this harness's se is
+  ~$110-170 a trade at these sample sizes, so nothing here is distinguishable
+  from zero. No null test was run because there is no positive result to null.
 
-  The gate is the second reading and it says the same thing. No cell reaches
-  better than 3/6 contracts net>0 AND PF>1, against 5/6 for the P3 frozen-level
-  sweep. Under clock the failures are NQZ25 -$4,465, NQM6 -$8,035 and
-  NQU26 -$1,145; the per-contract t range is -1.02 to +1.30 and not one
+  The gate says the same thing. No cell reaches better than 3/6 contracts
+  net>0 AND PF>1, against 5/6 for the P3 frozen-level sweep, and no single
   contract is individually significant in either direction.
 
-  And the placebo does not discriminate, because there is nothing to
-  discriminate. Replacing the volume POC with the geometric MIDPOINT of the
-  same window -- deleting every bit of volume information while keeping the
-  window, the range, the breakout test and the stop -- costs $5,365 on clock
-  and IMPROVES the gate, 3/6 to 4/6. Whatever small amount is happening here
-  is "price retraces into a range after leaving it", and the profile is
-  decoration. That is the same disease that killed poc_now and AVPMD.
+  The placebo does not discriminate, because there is nothing to discriminate.
+  Replacing the volume POC with the geometric MIDPOINT of the same window --
+  deleting every bit of volume information while keeping the window, the range,
+  the breakout test and the stop -- costs $3,060 on clock and IMPROVES the
+  gate, 3/6 to 4/6. Whatever little is happening is "price retraces into a
+  range after leaving it", and the profile is decoration. Same disease that
+  killed poc_now and AVPMD.
 
   compress's threshold was calibrated on TRADE COUNT ALONE and P/L was never
-  read during that step: at the 1.25xATR default it takes 9 trades in 387
-  sessions, so the 6-bar range cap was walked out to 2.75xATR, which yields 110
-  setups against clock's 116. That makes the two modes comparable. It is not a
-  tuned number and it was not chosen for its P/L.
+  read during that step: at the 1.25xATR default it takes 6 trades in 387
+  sessions, so the 6-bar range cap was walked out to 2.75xATR, which yields
+  110 setups against clock's 116. Not a tuned number.
+
+  HARNESS BUG, FOUND AND FIXED AFTER THE FIRST RUN (kept here as a warning)
+  The first version of this file computed ATR as a simple average of true
+  range instead of calling the repo's atr_wilders(). Wilders is what
+  sc.ATR(MOVAVGTYPE_WILDERS) computes in the live cpp, and the two differ by
+  ~22% -- 32.61 against 26.66 on NQU6 2026-08-26. Since EVERY threshold in
+  this file is an ATR multiple, that inflated the breakout epsilon, the POC
+  tolerance, the stop buffer, both stop clamps and the compression cap all at
+  once. The pre-fix numbers were clock +$17,350 t=+0.87 and compress +$13,770
+  t=+0.92; corrected they are +$10,530 t=+0.55 and +$1,330 t=+0.12. The
+  verdict did not change, but it would have been reported ~65% too generous.
+  Do not hand-roll an indicator that the repo already has.
 
   WHAT WOULD AND WOULD NOT BE A LEGITIMATE NEXT STEP
   Not legitimate: sweeping brk_end, pb_bars, target_r, or the stop placement
@@ -125,8 +134,8 @@ import numpy as np
 from backtest import Bar
 from fastbars import load_bars_cached
 from backtest_mizan_iof_nq import (BAR_MINUTES, ES_FROZEN, MNQ, NQ_FROZEN,
-                                   Cands, arrays, poc_of, simulate,
-                                   summarize, write_csv)
+                                   Cands, arrays, atr_wilders, poc_of,
+                                   simulate, summarize, write_csv)
 from backtest_mizan_p3 import (CL_FROZEN, GC_FROZEN, IS_TAGS, OOS_TAGS, SPECS,
                                instrument_of, sessions_cached, _rt)
 
@@ -215,18 +224,6 @@ def _empty() -> Cands:
     return Cands(e, e, f, f, f, f, f, f, e, e, 0)
 
 
-def _atr(a, n: int) -> np.ndarray:
-    """Simple-average true range. Matches the P3 convention: the value is read
-    once, on the last bar before 09:30, and frozen for the session."""
-    pc = np.r_[a.c[0], a.c[:-1]]
-    tr = np.maximum(a.h - a.l, np.maximum(np.abs(a.h - pc), np.abs(a.l - pc)))
-    out = np.full(len(tr), np.nan)
-    if len(tr) >= n:
-        cs = np.cumsum(np.r_[0.0, tr])
-        out[n - 1:] = (cs[n:] - cs[:-n]) / n
-    return out
-
-
 def scan(bars: List[Bar], p: Params) -> Cands:
     key = (id(bars), p.sig_key)
     hit = _SCAN_CACHE.get(key)
@@ -235,7 +232,7 @@ def scan(bars: List[Bar], p: Params) -> Cands:
 
     a = arrays(bars)
     S = sessions_cached(bars, p)
-    atr = _atr(a, p.atr_len)
+    atr = atr_wilders(a, p.atr_len)
     out = []
 
     for k in range(len(S.starts)):
