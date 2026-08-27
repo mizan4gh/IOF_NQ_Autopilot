@@ -163,6 +163,55 @@ POC-TOUCH ENTRY AND VOLUME BARS (2026-08-21)
   underpowered -- but a real liquidity-structure effect ought to show up
   somewhere other than one index, and it does not.
 
+6E BREADTH TEST -- PRE-REGISTERED 2026-08-26, DATA NOT YET DOWNLOADED
+  Written BEFORE the .scid files exist, because this thread has run enough
+  cells that a criterion invented after seeing the number is worthless.
+
+  THE QUESTION. Everything positive here is one index over 15 consecutive
+  months: NQ at the 99.4th percentile, 5/6. ES is 0.954 correlated, n=276,
+  properly powered, and came back at the 41.5th. CL 47.4th, GC 64.0th -- both
+  uncorrelated but n=51-64, too thin to conclude either way. So there is no
+  well-powered test of this rule outside the Nasdaq. 6E is the first one
+  available: FX, uncorrelated with equity indices, and liquid enough that the
+  front-month quarters should yield ~190 sessions and ~120 trades.
+
+  WHAT COUNTS AS A PASS, fixed in advance:
+    PASS     null percentile >= 95.0 AND net > 0 on 2 of 3 contracts, at
+             EITHER session framing below. That is evidence the pattern is
+             about markets rather than about the Nasdaq.
+    FAIL     percentile < 80.0 at both framings. The rule is NQ-specific and
+             the thread closes.
+    NEITHER  80.0-95.0, or a pass on only one framing. Report as
+             inconclusive; do NOT then go looking for a third framing.
+
+  BOTH FRAMINGS MUST BE RUN, and both are declared here so that picking the
+  better one afterwards is not available:
+    (a) 09:30 ET open, unchanged, for comparability with every NQ number.
+    (b) MZ3_RTH_OPEN=300, the London handover. The rule's premise is that a
+        session open manipulates an overnight range, and 09:30 ET is not
+        structurally special for EUR/USD -- 03:00 is. This is the same
+        courtesy CL got at its 09:00 pit open and GC at 08:20.
+  Two framings is the entire multiple-comparison budget. No third.
+
+  NOTHING ELSE MAY BE TUNED. sweep_eps_atr, sweep_close_pos, stop_buf_atr,
+  target_r, manip_end and the stop clamps stay at their NQ values. Every one
+  is ATR-denominated already, which is precisely so that a new instrument
+  needs no refitting. If 6E only works after a threshold is moved, that is a
+  fitted result on n~120, not a breadth result.
+
+  CHECK BEFORE BELIEVING ANY OF IT:
+    - bin_pts. At the NQ default of 1.0 the whole 6E overnight profile lands
+      in ONE bin and the POC is garbage. SPECS sets 0.0005; confirm the ON_POC
+      column in the CSV actually varies day to day.
+    - date overlap between the three contracts. Sierra serves a contract's
+      whole life, not just its front month, so two of them can clear the data
+      gates on the SAME session and double-count it. This already bit the
+      NQU26/MNQU6 OOS number. Check for duplicate Date values across the
+      three CSVs before pooling.
+    - trade count. If n comes in under ~60, 6E has joined CL and GC as
+      underpowered and the correct verdict is "still no well-powered test
+      outside NQ", not "another failure".
+
 ONE SETUP PER DAY -- VALIDATED, NOT JUST ASSUMED (2026-08-26)
   The cpp locks the session on the first qualifying sweep (SetupTaken), and
   across the six contracts that lock DISCARDS 671 further qualifying sweeps
