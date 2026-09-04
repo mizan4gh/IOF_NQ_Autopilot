@@ -43,7 +43,7 @@ def main():
     argv = sys.argv[1:]
     draws, scope, which = 200, "--nq", "rolling"
     for a in argv:
-        if a in ("--p3", "--avpmd"):
+        if a in ("--p3", "--avpmd", "--amd"):
             which = a[2:]
         elif a.startswith("--"):
             scope = a
@@ -54,6 +54,8 @@ def main():
         import backtest_mizan_p3 as MZ
     elif which == "avpmd":
         import backtest_mizan_avpmd as MZ
+    elif which == "amd":
+        import backtest_amd_continuation as MZ
     else:
         import backtest_mizan_iof_nq as MZ
 
