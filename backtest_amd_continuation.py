@@ -124,7 +124,13 @@ RESULTS (2026-09-03, clock window, $5 RT, slip 0)  ---  NO SHIP
      in 30 opportunities.  The volume profile is not merely non-load-bearing
      here -- it is the clause that prevents the trade from existing.
 
-  2. THE PROFILE IS DECORATION, for the fourth time.  Entering at the BROKEN
+  2. THE PROFILE IS DECORATION, for the fourth time -- and in the best-
+     scoring cell it is not even READ.  entry_mode="break" fills at the next
+     bar's open, so entry_level never reaches the code: running that cell at
+     poc / va / mid / edge returns byte-identical per-trade CSVs on all six
+     contracts (md5, not eyeball).  The vestigial isfinite(poc) guard that
+     could have filtered the sample was removed, and the result is unchanged
+     byte-for-byte.  So the +$12,450 has no volume profile in it anywhere.  Entering at the BROKEN
      PRICE EDGE -- no profile at all -- scores +$12,445 on 27 trades against
      the POC's +$6,785 on 8, and the geometric midpoint fills more often too.
      Same finding as consol_poc, poc_now and AVPMD.  A POC-pullback entry has
@@ -149,6 +155,28 @@ RESULTS (2026-09-03, clock window, $5 RT, slip 0)  ---  NO SHIP
      Both prior AMD threads concluded the A/M/D sequence carried nothing;
      on this construction -- trap one edge, then require the OPPOSITE edge to
      go -- it carries something.
+
+     3b. ...BUT THAT 94.0th IS NOT LEAVE-ONE-OUT ROBUST, AND THAT KILLS IT.
+     The break-open cell reads no level at all (proved below), so its per-
+     contract split is the whole story, and two of six contracts carry more
+     than all of it:
+
+       NQU25 -165 | NQZ25 +390 | NQM5 +7,635 | NQH6 -1,745 | NQM6 +9,995 |
+       NQU26 -3,660        -- 3/6 negative, and the other four sum to -5,180
+
+       drop        n      net     null pctile
+       none       30  +12,450        94.0th
+       NQM5       24   +4,815        78.0th
+       NQM6       24   +2,455        69.0th
+       both       18   -5,180        28.0th
+
+     NQM5 (+$7,635) and NQM6 (+$9,995) both sit inside the documented
+     +/-$8k-per-contract noise band.  Removing either one costs 16-25
+     percentile points; removing both turns the result NEGATIVE.  A finding
+     that lives in two contracts out of six is one favorable draw, not an
+     effect -- the same standard that M2-disable passed (LOO-robust all 6) and
+     that this fails.  Treat "the trap picks a side" as UNSUPPORTED, not as a
+     live lead.
 
   4. AND IT FAILS THE SAME WAY THE P3 SWEEP FAILED: equity indices only.
 
@@ -443,8 +471,15 @@ def scan(bars: List[Bar], p: Params) -> Cands:
         rng = chi - clo
         if rng <= 0:
             continue
+        # The profile is only an INPUT in limit mode.  entry_mode="break"
+        # fills at the next bar's open and never reads a level, so computing
+        # the POC there -- and, worse, dropping a candidate on a non-finite
+        # one -- would let a profile the strategy does not use silently filter
+        # the sample.  Under break mode it is recorded for the CSV and nothing
+        # else; the guard is applied where the level is actually consumed.
+        uses_profile = p.entry_mode == "limit"
         poc, vah, val = profile_of(a, w0, w1, p.bin_pts, p.va_pct)
-        if not np.isfinite(poc):
+        if uses_profile and not np.isfinite(poc):
             continue
 
         eps_s = p.sweep_eps_atr * A
@@ -522,17 +557,19 @@ def scan(bars: List[Bar], p: Params) -> Cands:
             continue
 
         # ── the entry ──────────────────────────────────────────────────────
-        if p.entry_level == "mid":
-            base_lv = 0.5 * (chi + clo)
-        elif p.entry_level == "edge":
-            base_lv = chi if side > 0 else clo
-        elif p.entry_level == "va":
-            base_lv = vah if side > 0 else val
-        else:
-            base_lv = poc
-        if not np.isfinite(base_lv):
-            continue
-        lv = float(_rt(base_lv + side * p.lvl_tol_atr * A, p.tick))
+        lv = float("nan")
+        if uses_profile:
+            if p.entry_level == "mid":
+                base_lv = 0.5 * (chi + clo)
+            elif p.entry_level == "edge":
+                base_lv = chi if side > 0 else clo
+            elif p.entry_level == "va":
+                base_lv = vah if side > 0 else val
+            else:
+                base_lv = poc
+            if not np.isfinite(base_lv):
+                continue
+            lv = float(_rt(base_lv + side * p.lvl_tol_atr * A, p.tick))
 
         e, fill = -1, 0.0
         if p.entry_mode == "break":
