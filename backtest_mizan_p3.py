@@ -479,6 +479,7 @@ class Params:
     # "sweep_limit_d" the D-requiring sweep_limit that 069d4e0 measured, kept
     #           only so that number stays reproducible. See the D block.
     entry_mode: str = "sweep"     # sweep | sweep_limit | sweep_limit_d
+                                  # sweep_mkt_fill | sweep_mkt_nofill (diag)
     #                             # confirm | poc | poc_now
     # ── bar construction ───────────────────────────────────────────────────
     # 0 = BAR_MINUTES time bars. >0 = constant-volume bars of that many
@@ -738,7 +739,8 @@ def scan(bars: List[Bar], p: Params) -> Cands:
             # A->M with no distribution stage, so the two were measuring different
             # strategies while reporting one number. Use "sweep_limit_d" for the
             # D-requiring variant that 069d4e0 actually measured.
-            if p.entry_mode in ("sweep", "sweep_limit", "poc_now"):
+            if p.entry_mode in ("sweep", "sweep_limit", "poc_now",
+                                "sweep_mkt_fill", "sweep_mkt_nofill"):
                 d = m                        # stage skipped: the sweep IS the entry
             else:
                 d = -1
@@ -768,7 +770,42 @@ def scan(bars: List[Bar], p: Params) -> Cands:
                         fill = min(a.o[j], lv) if side > 0 else max(a.o[j], lv)
                         manage = j          # limit fill -> conservative, own bar
                         break
-            elif p.entry_mode in ("confirm", "sweep"):
+            elif p.entry_mode in ("confirm", "sweep",
+                                  "sweep_mkt_fill", "sweep_mkt_nofill"):
+                # ── FILTER DECOMPOSITION -- DIAGNOSTIC, NOT A TRADEABLE RULE ──
+                # sweep_limit makes $12,610 more than sweep. Three things could
+                # be doing that: the FILTER (setups whose limit never fills are
+                # never entered), the PRICE (the limit fills better than the
+                # next open), or the STOP (measured from the limit, not the
+                # close). These two modes isolate the first: take the MARKET
+                # entry, unchanged in price, stop and manage bar, and keep only
+                # the setups whose limit WOULD (fill) or WOULD NOT (nofill)
+                # have filled.
+                #
+                # THIS USES HINDSIGHT AND CANNOT BE TRADED. The market order
+                # goes in at m+1's open; whether the limit fills is not known
+                # until m+limit_bars. sweep_limit itself has no such problem --
+                # a resting order fills or it does not, and the entry happens
+                # at the moment the answer is revealed. These modes exist only
+                # to say WHERE the money lives, and any positive number they
+                # produce is not a strategy.
+                if p.entry_mode in ("sweep_mkt_fill", "sweep_mkt_nofill"):
+                    lvp = float(round_to_tick(a.c[m]
+                                              - side * p.limit_off_atr * A))
+                    thru = p.require_through * TICK
+                    would = False
+                    for j in range(m + 1,
+                                   min(m + 1 + p.limit_bars, rth_end)):
+                        if a.hhmm[j] > p.session_end:
+                            break
+                        if (a.c[j] < invalid) if side > 0 else (a.c[j] > invalid):
+                            break
+                        if ((a.l[j] <= lvp - thru) if side > 0
+                                else (a.h[j] >= lvp + thru)):
+                            would = True
+                            break
+                    if would != (p.entry_mode == "sweep_mkt_fill"):
+                        continue
                 j = d + 1
                 if j < rth_end and a.hhmm[j] <= p.session_end:
                     e, fill = j, float(a.o[j])
@@ -965,6 +1002,11 @@ def main():
                             f"sweep, armed {p.limit_bars} bars",
              "sweep_limit_d": f"as sweep_limit but the D stage is REQUIRED "
                               f"[what 069d4e0 measured]",
+             "sweep_mkt_fill": "MARKET next open, but ONLY setups whose limit "
+                               "would have filled [DIAGNOSTIC, uses hindsight]",
+             "sweep_mkt_nofill": "MARKET next open, but ONLY setups whose "
+                                 "limit would NOT have filled [DIAGNOSTIC, "
+                                 "uses hindsight]",
              }.get(p.entry_mode, p.entry_mode)
     barsrc = f"{p.vol_bars}-contract volume bars" if p.vol_bars else f"{BAR_MINUTES}m"
     print("Mizan_IOF_NQ_P3 -- daily power-of-three on FROZEN levels "
@@ -972,7 +1014,8 @@ def main():
     print(f"  A: overnight 18:00-09:29 (>={p.min_on_bars} bars) -> frozen "
           f"{lv} + ON_POC + ATR")
     dist = ("D: SKIPPED"
-            if p.entry_mode in ("sweep", "sweep_limit", "poc_now") else
+            if p.entry_mode in ("sweep", "sweep_limit", "poc_now",
+                                "sweep_mkt_fill", "sweep_mkt_nofill") else
             f"D: close {p.dist_min_atr}xATR clear of ON_POC within "
             f"{p.dist_bars} bars")
     print(f"  M: sweep a frozen level by >{p.sweep_eps_atr}xATR and reclaim, "

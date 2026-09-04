@@ -107,8 +107,50 @@
 //
 //  So mode 1's extra $12,610 is a filter wearing a fill's clothing. It may well
 //  be a real filter — the order fills or it does not, there is no hindsight in
-//  it — but it is a DIFFERENT claim from the one this file's levels make, and
-//  it has never been tested as one.
+//  it — but it is a DIFFERENT claim from the one this file's levels make.
+//
+//  THE FILTER DECOMPOSITION, RUN 2026-09-03 — the paragraph above is only
+//  a third right, and the rest of it is the reason the placebo does not
+//  collapse. Two diagnostic modes were added to backtest_mizan_p3.py:
+//  sweep_mkt_fill and sweep_mkt_nofill take the MARKET entry — unchanged in
+//  price, stop and manage bar — and keep only the setups whose limit WOULD or
+//  WOULD NOT have filled. They partition the 253 sweeps exactly, 222 + 31, and
+//  their P/L sums to the market rule's to the dollar. (They use hindsight by
+//  construction and are diagnostics, never rules: the market order goes in at
+//  m+1 and the fill is not known until m+3. Mode 1 itself has no such problem.)
+//
+//      REAL LEVELS                n      net    $/trd      t   mean stop
+//        sweep       (all)      253  +62,730     +248   +2.47      48.56
+//        mkt, would fill        222  +67,095     +302   +2.80      48.40
+//        mkt, would NOT fill     31   -4,365     -141   -0.53      49.69
+//        sweep_limit            222  +75,340     +339   +3.26      46.59
+//
+//      PLACEBO shift 0.20         n      net    $/trd      t   mean stop
+//        sweep       (all)      266  -36,520     -137   -1.57      48.45
+//        mkt, would fill        233  -11,655      -50   -0.52      48.42
+//        mkt, would NOT fill     33  -24,865     -753   -4.49      48.72
+//        sweep_limit            233  +13,110      +56   +0.59      46.61
+//
+//  On REAL levels the filter is worth +$4,365 of the +$12,610 — 35%, and the
+//  group it discards has t=-0.53 on 31 trades with 3 of 6 contracts positive,
+//  which is not a demonstrated losing group at all. The other 65% is
+//  mechanical: resting 0.15 x ATR back toward the sweep shortens |fill -
+//  invalid|, so the stop is 3.7% tighter (48.40 -> 46.59) and the 2R target
+//  comes in with it. Mode 1 is mostly a TIGHTER STOP wearing a fill's
+//  clothing, not a filter.
+//
+//  On FAKE levels the filter is worth +$24,865 and the group it discards
+//  loses $753 a trade at t=-4.49. THAT is why mode 1's placebo does not
+//  collapse. A sweep of a meaningless line that then runs away without
+//  retracing is a catastrophic trade, and the resting limit simply never
+//  enters it. The filter is level-agnostic damage control: it rescues a
+//  losing rule as readily as it improves a winning one, so a good score under
+//  mode 1 says nothing about whether ONH/ONL/PDH/PDL mean anything. Mode 0
+//  stays the default, and the reason is now measured rather than suspected.
+//
+//  What is still untested: whether that retrace filter has standalone value
+//  on a trigger this file does not implement. It is a real, hindsight-free
+//  rule. It is simply not evidence for these levels.
 //
 //  One setup per session is consumed by the SWEEP, not by the fill: a limit
 //  that expires unfilled does not free the day for a second sweep. That is what
