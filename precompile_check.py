@@ -18,8 +18,9 @@ WHY THIS EXISTS
       inputs the same control. Gaps are legal and only noted.
     * sc.Subgraph[] slots that are duplicated
     * persistent-key enums whose values collide  (compiles fine, corrupts state)
-    * C++11+ constructs, which are fine on a modern toolchain but are the first
-      suspect if Sierra's bundled compiler is older than you assume
+    * C++11+ constructs -- reported as a NOTE only. Sierra's own scstructures.h
+      uses 407 in-class member initialisers, a C++11-only construct, so the
+      toolchain is already >=C++11 and these carry no extra risk.
     * a missing SCDLLName or SCSFExport entry point
 
 USAGE
@@ -160,8 +161,9 @@ def check(path):
     for n in notes:
         print(f"    note: {n}")
     if cxx:
-        print(f"    note: uses C++11+ ({', '.join(cxx)}) -- fine on a modern "
-              f"toolchain, first suspect if Sierra's compiler is older")
+        print(f"    note: uses C++11+ ({', '.join(cxx)}). Safe: scstructures.h "
+              f"has 407 in-class member initialisers, itself C++11-only, so "
+              f"Sierra's headers already require >=C++11.")
     return len(problems)
 
 

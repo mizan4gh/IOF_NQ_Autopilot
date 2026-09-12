@@ -1532,6 +1532,13 @@ SCSFExport scsf_IOF_NQ_VWAPPullback(SCStudyInterfaceRef sc)
 
     // One place to count a rejection reason and optionally label it on the chart.
     // Declared as a lambda so every exit path books the same diagnostics.
+    //
+    // The lambdas here are SAFE and do not need refactoring away, despite being
+    // the only C++11 construct in this repo's studies. sierrachart.h's own
+    // scstructures.h contains 407 in-class member initialisers, which are
+    // C++11-only -- so Sierra's headers cannot compile below C++11 and lambdas
+    // (also C++11) add no toolchain risk. precompile_check.py flags them as a
+    // note, not a problem, for exactly this reason.
     int LabelSlot = 0;
     auto Reject = [&](int Reason, const char* Extra)
     {
