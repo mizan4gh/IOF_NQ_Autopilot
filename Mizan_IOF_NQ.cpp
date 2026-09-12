@@ -93,6 +93,40 @@
 //  implement and never did. That mode is now "sweep_limit_d" and still
 //  reproduces 105 / +$91,795; "sweep_limit" is what runs here.)
 //
+//  SWEEP_LIMIT_D, MEASURED 2026-09-12 -- the most dangerous number in this
+//  file, and NOT a candidate for the default. It is the only configuration
+//  here that passes the ship gate, and it earns that by having no level
+//  content whatsoever:
+//
+//                          mode 0 MARKET   mode 1 LIMIT   sweep_limit_d
+//      trades                        253            222             105
+//      pooled net                +$62,730       +$75,340        +$91,795
+//      ship gate                 5/6 FAIL       5/6 FAIL        6/6 PASS
+//      re-sign null                99.0th        100.0th         100.0th
+//      PLACEBO shift 0.10          83.0th        100.0th         100.0th
+//      PLACEBO shift 0.20          19.5th         98.0th         100.0th
+//
+//  Under placebo shift 0.10 -- every frozen level pulled inward, its claim to
+//  be a structural price destroyed -- sweep_limit_d makes 120 trades for
+//  +$92,270 at 6/6. That is MORE money than it makes on the real levels, and
+//  it still passes the ship gate. At 0.20 it is +$62,185 on 131 trades. It
+//  never leaves the 100th percentile of its own re-sign null in any of the
+//  three. Mode 0 collapses 99.0th -> 19.5th over the same range, which is what
+//  a load-bearing level is supposed to do.
+//
+//  So the ship gate does not discriminate for this mode -- it passes on fake
+//  levels too. Do not read "6/6 PASS" as the missing validation. sweep_limit_d
+//  is the limit entry (already shown to be a tighter stop plus level-agnostic
+//  damage control) plus a distribution stage this file does not implement.
+//  Making it the default would mean adding a volume profile back for the
+//  ON_POC clearance test, in order to ship the one variant with the LEAST
+//  evidence that ONH/ONL/PDH/PDL mean anything. Entry Mode 0 stays default.
+//
+//  Reproduce:
+//    MZ3_ENTRY_MODE=sweep_limit_d python backtest_mizan_p3.py
+//    MZ3_ENTRY_MODE=sweep_limit_d MZ3_PLACEBO_SHIFT=0.10 python backtest_mizan_p3.py
+//    MZ3_ENTRY_MODE=sweep_limit_d python backtest_mizan_null.py 200 --nq --p3
+//
 //  The last two rows are the whole story, and the correction sharpens them.
 //  Pull every frozen level inward by a fraction of the overnight range — keep
 //  the sweep mechanic, destroy the level's claim to be a structural price —
