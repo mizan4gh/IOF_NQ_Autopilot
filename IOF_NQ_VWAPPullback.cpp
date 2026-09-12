@@ -28,6 +28,25 @@ SCDLLName("IOF_NQ_VWAPPullback")
 //    4. CONFIRM    The next completed bar closes above the rejection bar high
 //                  plus ConfirmBuffer.  -> enter.
 //
+//  DEFAULTS ARE NOT THE LITERAL SPECIFICATION -- read this before trading it.
+//  The spec as written takes 3 trades in 387 contract-days: a stop beyond the
+//  rejection-bar extreme, a fixed 100-tick target and a 1.5 minimum RR together
+//  require a stop <= 16.67 points, and the median 5m NQ bar range is 19-48. So
+//  the shipped defaults are the best-measured configuration instead:
+//
+//      Geometry Denomination = 1 (ATR multiples, not points)
+//      Reference Level       = 1 (unweighted mean of typical price, not VWAP)
+//      Target Mode           = 2 (2.0 R multiple, not fixed ticks)
+//      Chart                 = 1-MINUTE bars
+//
+//  Set those four back to 0/0/0 and a 5m chart to run the specification.
+//
+//  This config is PRE-REGISTERED, NOT VALIDATED -- see
+//  PREREG_vwap_pullback_tpavg.md. It is best-of-three on a bar interval and
+//  target mode themselves chosen after their first settings failed; it has
+//  never been run on held-out data, because none exists in the repo; and gold
+//  is negative under it. sc.SendOrdersToTradeService stays 0 for that reason.
+//
 //  NOTHING HERE IS VALIDATED. This file implements the specification; it makes
 //  no claim that the specification has an edge. Per this repo's own bar, a cpp
 //  constant ships only after a 2+ independent contract A/B, and the re-sign
@@ -225,7 +244,9 @@ enum VPPersistFloat
     PF_ATR         = 12,
     PF_MFE         = 13,  // best price reached since the fill
     PF_RISK_PTS    = 14,
-    PF_FROZEN_ATR  = 15   // ATR captured at this session's RTH open
+    PF_FROZEN_ATR  = 15,  // ATR captured at this session's RTH open
+    PF_SESS_HI     = 16,  // running session high (level_mode 2 only)
+    PF_SESS_LO     = 17
 };
 
 enum VPPersistDouble
@@ -374,6 +395,7 @@ SCSFExport scsf_IOF_NQ_VWAPPullback(SCStudyInterfaceRef sc)
     SCInputRef In_StopBufATR     = sc.Input[66];
     SCInputRef In_MinStopATR     = sc.Input[67];
     SCInputRef In_MaxStopATR     = sc.Input[68];
+    SCInputRef In_LevelMode      = sc.Input[69];
 
     // =========================================================================
     // DEFAULTS
@@ -382,8 +404,11 @@ SCSFExport scsf_IOF_NQ_VWAPPullback(SCStudyInterfaceRef sc)
     {
         sc.GraphName        = "IOF NQ VWAP Pullback / Failed Retest";
         sc.StudyDescription = "RTH-only NQ trend-continuation system. Enters on a "
-                              "failed retest of session VWAP in the direction of the "
-                              "established intraday trend.";
+                              "failed retest of an intraday reference level in the "
+                              "direction of the established trend. Defaults to the "
+                              "best-measured config (ATR geometry, unweighted "
+                              "typical-price mean, 2R target) on a 1-MINUTE chart, "
+                              "NOT the literal spec. Pre-registered, not validated.";
         sc.GraphRegion      = 0;
         sc.AutoLoop         = 1;
         sc.FreeDLL          = 0;
@@ -556,8 +581,31 @@ SCSFExport scsf_IOF_NQ_VWAPPullback(SCStudyInterfaceRef sc)
         // See VWAP_PULLBACK_README.md.
         // ---------------------------------------------------------------------
         In_GeomMode.Name = "Geometry Denomination (0=Points, 1=ATR Multiples)";
-        In_GeomMode.SetInt(0);
+        In_GeomMode.SetInt(1);   // best-measured; see the DEFAULTS banner
         In_GeomMode.SetIntLimits(0, 1);
+
+        // ---------------------------------------------------------------------
+        // REFERENCE LEVEL
+        //
+        // 0 = session VWAP, the literal specification.
+        // 1 = tpavg: the running UNWEIGHTED mean of typical price. Identical
+        //     anchor and shape; volume simply does not vote.
+        // 2 = mid: running (session high + session low) / 2. A pure geometric
+        //     level -- the placebo.
+        //
+        // MEASURED (NQ, 1m, ATR geometry, 200-draw re-sign null, 6 contracts):
+        //     level   net       null     worst LOO
+        //     vwap    +$14,277  93.5th   72.5th  <- dies
+        //     tpavg   +$20,055  99.0th   95.0th  <- default
+        //     mid     -$202     54.0th   --      <- coinflip
+        //
+        // So the LEVEL is load-bearing (mid is a coinflip) but the VOLUME
+        // WEIGHTING is not -- deleting it improves every measure. Mode 1 is the
+        // default for that reason. Mode 2 exists to re-run the placebo.
+        // ---------------------------------------------------------------------
+        In_LevelMode.Name = "Reference Level (0=Session VWAP, 1=TypPrice Mean, 2=Range Mid)";
+        In_LevelMode.SetInt(1);
+        In_LevelMode.SetIntLimits(0, 2);
 
         In_ProximityATR.Name = "ATR mode: VWAP Proximity (x ATR)";
         In_ProximityATR.SetFloat(0.816f);
@@ -708,7 +756,7 @@ SCSFExport scsf_IOF_NQ_VWAPPullback(SCStudyInterfaceRef sc)
         In_StopAtrMult.SetFloatLimits(0.1f, 20.0f);
 
         In_TargetMode.Name = "Target Mode (0=Fixed Ticks, 1=ATR, 2=R Multiple)";
-        In_TargetMode.SetInt(0);
+        In_TargetMode.SetInt(2);   // fixed-tick target cannot satisfy MinRR
         In_TargetMode.SetIntLimits(0, 2);
 
         In_FixedTgtTicks.Name = "Fixed Target (ticks)";
@@ -895,6 +943,8 @@ SCSFExport scsf_IOF_NQ_VWAPPullback(SCStudyInterfaceRef sc)
     float& r_Mfe       = sc.GetPersistentFloat(PF_MFE);
     float& r_RiskPts   = sc.GetPersistentFloat(PF_RISK_PTS);
     float& r_FrozenAtr = sc.GetPersistentFloat(PF_FROZEN_ATR);
+    float& r_SessHi    = sc.GetPersistentFloat(PF_SESS_HI);
+    float& r_SessLo    = sc.GetPersistentFloat(PF_SESS_LO);
 
     double& r_DayStartClosed = sc.GetPersistentDouble(PD_DAY_START_CLOSED);
     double& r_PrevClosed     = sc.GetPersistentDouble(PD_PREV_CLOSED);
@@ -991,6 +1041,8 @@ SCSFExport scsf_IOF_NQ_VWAPPullback(SCStudyInterfaceRef sc)
         // session-anchored mode there is no pre-open ATR, so it is captured
         // from the first warm RTH bar instead (see below).
         r_FrozenAtr = 0.f;
+        r_SessHi = 0.f;
+        r_SessLo = 0.f;
         if (AnchorMode == 0 && i > 0)
         {
             const float PreOpenAtr = Sg_ATR[i - 1];
@@ -1037,31 +1089,64 @@ SCSFExport scsf_IOF_NQ_VWAPPullback(SCStudyInterfaceRef sc)
     const float C = sc.BaseDataIn[SC_LAST][i];
     const float V = sc.BaseDataIn[SC_VOLUME][i];
 
+    // The reference level. Mode 0 weights each bar by its volume (VWAP); mode 1
+    // weights every bar equally (tpavg); mode 2 ignores price-time entirely and
+    // takes the running mid of the session range. Modes 0 and 1 share the same
+    // two accumulators -- the ONLY difference is the weight, which is exactly
+    // the claim the placebo ladder tests.
+    const int LevelMode = In_LevelMode.GetInt();
+
     if (BarClosed && i > r_LastAccBar)
     {
         const float Tp = (H + L + C) / 3.0f;
-        if (V > 0.f)
+        if (LevelMode == 1)
+        {
+            r_PxVol += Tp;          // weight 1 per bar: volume does not vote
+            r_Vol   += 1.0f;
+        }
+        else if (V > 0.f)
         {
             r_PxVol += Tp * V;
             r_Vol   += V;
         }
+
+        if (r_SessHi <= 0.f) { r_SessHi = H; r_SessLo = L; }
+        else { r_SessHi = VP_Max(r_SessHi, H); r_SessLo = VP_Min(r_SessLo, L); }
+
         r_LastAccBar = i;
         r_RthBars   += 1;
     }
 
-    // Signal VWAP uses only what has been folded in from CLOSED bars. The chart
-    // line additionally blends the forming bar so the plot does not lag, but the
-    // state machine never reads that value -- that separation is the no-repaint
-    // guarantee for VWAP.
-    const float VwapSignal = (r_Vol > 0.f) ? (r_PxVol / r_Vol) : C;
+    // The signal level uses only what has been folded in from CLOSED bars. The
+    // chart line additionally blends the forming bar so the plot does not lag,
+    // but the state machine never reads that value -- that separation is the
+    // no-repaint guarantee for the level.
+    float VwapSignal;
+    if (LevelMode == 2)
+        VwapSignal = (r_SessHi > 0.f) ? ((r_SessHi + r_SessLo) * 0.5f) : C;
+    else
+        VwapSignal = (r_Vol > 0.f) ? (r_PxVol / r_Vol) : C;
 
     float VwapDisplay = VwapSignal;
-    if (!BarClosed && V > 0.f)
+    if (!BarClosed)
     {
         const float Tp = (H + L + C) / 3.0f;
-        const float dv = r_Vol + V;
-        if (dv > 0.f)
-            VwapDisplay = (r_PxVol + Tp * V) / dv;
+        if (LevelMode == 2)
+        {
+            const float hi = (r_SessHi > 0.f) ? VP_Max(r_SessHi, H) : H;
+            const float lo = (r_SessHi > 0.f) ? VP_Min(r_SessLo, L) : L;
+            VwapDisplay = (hi + lo) * 0.5f;
+        }
+        else if (LevelMode == 1)
+        {
+            VwapDisplay = (r_PxVol + Tp) / (r_Vol + 1.0f);
+        }
+        else if (V > 0.f)
+        {
+            const float dv = r_Vol + V;
+            if (dv > 0.f)
+                VwapDisplay = (r_PxVol + Tp * V) / dv;
+        }
     }
 
     Sg_VWAP[i]   = VwapDisplay;

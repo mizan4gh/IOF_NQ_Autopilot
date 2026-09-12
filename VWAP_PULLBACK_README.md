@@ -74,7 +74,27 @@ Long case; short is the exact mirror.
 
 ## Configuration
 
-All 69 inputs are exposed in the study settings dialog. The ones that matter most:
+> ### The defaults are NOT the literal specification
+>
+> The spec as written takes **3 trades in 387 contract-days** — its risk rules are
+> arithmetically unsatisfiable (see below). Shipping it as the default would ship a
+> strategy that does not trade. The defaults are therefore the best-measured config:
+>
+> | Setting | Default | Spec value |
+> |---|---|---|
+> | Chart bar period | **1 minute** | 5 minute |
+> | `Geometry Denomination` | **1 (ATR multiples)** | 0 (points) |
+> | `Reference Level` | **1 (unweighted typical-price mean)** | 0 (session VWAP) |
+> | `Target Mode` | **2 (2.0 R multiple)** | 0 (fixed 100 ticks) |
+>
+> Set those four back and use a 5m chart to run the specification exactly.
+> In Python: `VP_geom_mode=points VP_level_mode=vwap VP_target_mode=0 VP_BAR_MINUTES=5`.
+>
+> **This config is pre-registered, not validated** (`PREREG_vwap_pullback_tpavg.md`).
+> `sc.SendOrdersToTradeService` stays at 0.
+
+
+All 70 inputs are exposed in the study settings dialog. The ones that matter most:
 
 **Session** — `RTH Open` 09:30, `Last Entry Time` 15:00, `Flatten All Positions At`
 15:45, `RTH Close` 16:00, `Chart-to-ET Offset` 0.
@@ -102,9 +122,10 @@ sweep. Mode 1 is the only one that means the same thing on CL, GC or an NQ contr
 at a different index level. It is also the one under which session VWAP shows no
 edge; see [the verdict](#session-vwap-the-edge-was-an-artifact-of-the-points-geometry).
 
-**Reference level** — Python engine only (`level_mode`; the cpp implements `vwap`).
-`vwap` is the specified strategy, `tpavg` is a volume-blind running mean of typical
-price, `mid` is a running session-range midpoint. The last two are placebos; see
+**Reference level** — `Reference Level` in the cpp, `level_mode` in Python; both
+now implement all three. `0/vwap` is the specified strategy, `1/tpavg` (**default**)
+is the volume-blind running mean of typical price, `2/mid` is the running
+session-range midpoint placebo. See
 [the placebo test](#the-placebo-test-it-is-the-volume-weighting-that-is-dead-not-the-level).
 
 ---
@@ -318,9 +339,10 @@ order:
    currently negative under both levels; that has to be faced, not averaged away.
 4. **Only then** a 2+ independent contract A/B before any cpp constant ships.
 
-Note the cpp implements `vwap` only. `tpavg` exists in the Python engine
-(`level_mode`) and has **not** been ported — deliberately, since porting an
-unvalidated best-of-three into the live study is how an artifact gets deployed.
+`tpavg` is now implemented in the cpp too (`Reference Level`) and is the default in
+both engines, so the two stay in parity. That is a change of *default*, not of
+status: it is still pre-registered and unvalidated, and the study still cannot send
+a live order until `sc.SendOrdersToTradeService` is set to 1 by hand.
 
 Reproduce any of the above with:
 

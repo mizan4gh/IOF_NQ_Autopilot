@@ -29,6 +29,10 @@ the re-sign null measures.
 
 ## 2. The frozen configuration
 
+**These are now the shipped defaults in both engines** (2026-09-12), so a bare run
+reproduces the registered config. The env vars below are redundant but kept explicit
+so the command is self-documenting and survives a future default change.
+
 Exact, no free parameters. Run with:
 
 ```

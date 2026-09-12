@@ -78,6 +78,26 @@ from backtest_trendfollow_propeval import ema
 BASE = Path(__file__).parent
 
 
+# ── DEFAULTS ─────────────────────────────────────────────────────────────────
+# The shipped defaults are the best-measured configuration, NOT the literal
+# specification. The spec (points geometry, session VWAP, fixed 100-tick target,
+# 5m bars) takes 3 trades in 387 contract-days -- its risk rules are
+# arithmetically unsatisfiable -- so defaulting to it would ship a strategy that
+# does not trade. Defaults are therefore:
+#
+#     bar_minutes 1 | geom_mode atr | level_mode tpavg | target_mode 2 (2.0R)
+#
+# which is the config pre-registered in PREREG_vwap_pullback_tpavg.md:
+# 99.0th re-sign null, 95.0th worst leave-one-out, net/DD 3.77, +$15,399/yr
+# single-account front month.
+#
+# IT IS PRE-REGISTERED, NOT VALIDATED. It is best-of-three on a bar interval and
+# target mode themselves chosen after their first settings failed, it has never
+# been run on held-out data (none exists in this repo), and gold is negative
+# under it. Reproduce the original specification with:
+#     VP_geom_mode=points VP_level_mode=vwap VP_target_mode=0 VP_BAR_MINUTES=5
+# ─────────────────────────────────────────────────────────────────────────────
+
 # ── parameters ───────────────────────────────────────────────────────────────
 @dataclass(frozen=True)
 class Params:
@@ -104,11 +124,11 @@ class Params:
     # six NQ contracts, ATR_ref = 9.8058 across 388 sessions. Each multiple is
     # just (original point value / ATR_ref) -- no knob was fitted individually,
     # which is what makes this a re-anchoring rather than an eight-way sweep.
-    geom_mode: str = "points"     # "points" | "atr"
+    geom_mode: str = "atr"        # "points" | "atr"
     # The reference level. "vwap" is the strategy; "tpavg" and "mid" are
     # placebos that strip out volume weighting and the level itself.
     # See session_level() for what each one tests.
-    level_mode: str = "vwap"      # "vwap" | "tpavg" | "mid"
+    level_mode: str = "tpavg"     # "vwap" | "tpavg" | "mid"
 
     proximity_pts: float = 8.0
     min_sep_pts: float = 15.0
@@ -149,7 +169,7 @@ class Params:
     stop_buf_atr: float = 0.102
     min_stop_atr: float = 0.408
     max_stop_atr: float = 5.099
-    target_mode: int = 0          # 0 = fixed ticks, 1 = ATR, 2 = R multiple
+    target_mode: int = 2          # 0 = fixed ticks, 1 = ATR, 2 = R multiple
     fixed_tgt_ticks: int = 100
     target_atr_mult: float = 3.0
     target_r: float = 2.0
@@ -209,7 +229,7 @@ SIDE_MODE = os.environ.get("VP_SIDE_MODE", "as_is")
 # already wider than the 25-point fixed target, and the 1.5 minimum RR rejects
 # essentially every candidate -- measured: 154 confirmations, 3 entries.
 # The spec's numbers only describe a tradable geometry on a fine chart.
-BAR_MIN = int(os.environ.get("VP_BAR_MINUTES", BAR_MINUTES))
+BAR_MIN = int(os.environ.get("VP_BAR_MINUTES", 1))
 
 
 # ── indicators ───────────────────────────────────────────────────────────────

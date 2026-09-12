@@ -131,7 +131,12 @@ def build_session(mutate=None, ramp=0.5, n_ramp=90, rng_half=6.0):
     return bars, confirm_idx
 
 
-P = VP.Params()
+# Every rule test pins its own config rather than inheriting whatever currently
+# ships as the default. Otherwise changing a default silently changes what the
+# rule tests assert, and a green suite stops meaning what it used to mean.
+# SPEC is the literal specification: points geometry, session VWAP, fixed target.
+SPEC = replace(VP.Params(), geom_mode="points", level_mode="vwap", target_mode=0)
+P = SPEC
 
 
 def count(bars, p=None):
@@ -481,6 +486,42 @@ class TestNoLookahead(unittest.TestCase):
         bars, ci = build_session()
         head = count(list(bars[:ci + 1]))
         self.assertEqual(len(head.idx), 0)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  THE SHIPPED DEFAULTS
+# ─────────────────────────────────────────────────────────────────────────────
+class TestShippedDefaults(unittest.TestCase):
+    """The defaults are deliberately the best-measured config, not the literal
+    spec -- the spec takes 3 trades in 387 contract-days. This pins them so a
+    stray edit cannot quietly ship a different strategy."""
+
+    def test_defaults_are_the_preregistered_config(self):
+        d = VP.Params()
+        self.assertEqual(d.geom_mode, "atr")
+        self.assertEqual(d.level_mode, "tpavg")
+        self.assertEqual(d.target_mode, 2)
+        self.assertAlmostEqual(d.target_r, 2.0)
+        self.assertAlmostEqual(d.min_rr, 1.5)
+        self.assertEqual(VP.BAR_MIN, 1, "defaults assume a 1-minute chart")
+
+    def test_atr_multiples_match_the_registered_anchor(self):
+        """Each multiple is the original point value / ATR_ref (9.8058). If one
+        of these drifts, the geometry is no longer the registered one and the
+        pre-registration in PREREG_vwap_pullback_tpavg.md is void."""
+        d = VP.Params()
+        ref = 9.8058
+        for mult, pts in ((d.proximity_atr, 8.0), (d.min_sep_atr, 15.0),
+                          (d.retest_tol_atr, 4.0), (d.confirm_buf_atr, 2.0),
+                          (d.stop_buf_atr, 1.0), (d.min_stop_atr, 4.0),
+                          (d.max_stop_atr, 50.0)):
+            self.assertAlmostEqual(mult, pts / ref, places=3)
+
+    def test_the_literal_spec_is_still_reachable(self):
+        """Reverting to the specification must remain possible, since that is
+        what the cpp's own default geometry still implements."""
+        bars, _ = build_session()
+        self.assertEqual(len(count(bars, SPEC).idx), 1)
 
 
 if __name__ == "__main__":
